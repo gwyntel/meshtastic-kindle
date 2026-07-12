@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#000000">
+  <link rel="manifest" href="manifest.json">
+  <title>mesh-kindle</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="header">
+      <div class="header-title">mesh-kindle</div>
+      <div class="header-actions">
+        <button class="btn btn-icon" id="refreshBtn" aria-label="refresh">&#8635;</button>
+        <button class="btn btn-icon" id="settingsBtn" aria-label="settings">...</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="messages">messages</button>
+      <button class="tab" data-tab="nodes">nodes</button>
+      <button class="tab" data-tab="map">map</button>
+    </nav>
+
+    <div class="tab-content" id="tabContent">
+      <!-- Messages tab -->
+      <div class="tab-panel active" id="panel-messages">
+        <div class="message-list" id="messageList">
+          <div class="empty-state">
+            <div class="empty-title">no messages</div>
+            <div class="empty-sub">waiting for mesh traffic...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Nodes tab -->
+      <div class="tab-panel" id="panel-nodes">
+        <div class="node-list" id="nodeList">
+          <div class="empty-state">
+            <div class="empty-title">no nodes</div>
+            <div class="empty-sub">no nodes discovered yet</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Map tab -->
+      <div class="tab-panel" id="panel-map">
+        <div class="position-list" id="positionList">
+          <div class="empty-state">
+            <div class="empty-title">no positions</div>
+            <div class="empty-sub">no position data available</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="input-area" id="inputArea">
+      <div class="input-row">
+        <input type="text" class="input-field" id="inputField" placeholder="broadcast..." maxlength="200">
+        <button class="btn btn-key" id="sendBtn">send</button>
+      </div>
+    </div>
+
+    <div class="status-bar" id="statusBar">connecting...</div>
+  </div>
+
+  <!-- Settings overlay -->
+  <div class="overlay" id="settingsOverlay">
+    <div class="settings-panel">
+      <div class="settings-header">
+        <div class="settings-title">settings</div>
+        <button class="btn btn-icon" id="closeSettings">x</button>
+      </div>
+      <div class="settings-group">
+        <label class="settings-label">device url</label>
+        <input type="text" class="settings-input" id="deviceUrlInput" placeholder="http://meshtastic.local">
+      </div>
+      <div class="settings-group">
+        <label class="settings-label">channel</label>
+        <input type="number" class="settings-input" id="channelInput" value="0" min="0" max="7">
+      </div>
+      <div class="settings-group">
+        <label class="settings-label">poll interval (seconds)</label>
+        <input type="number" class="settings-input" id="pollInput" value="2" min="1" max="60">
+      </div>
+      <div class="settings-actions">
+        <button class="btn" id="testConnBtn">test</button>
+        <button class="btn btn-key" id="saveSettingsBtn">save</button>
+      </div>
+      <div class="settings-info" id="settingsInfo"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
