@@ -12,6 +12,7 @@ does all the heavy lifting and returns clean JSON.
 import http.server
 import json
 import os
+import socket
 import struct
 import sys
 import threading
@@ -39,20 +40,43 @@ DEFAULT_CHANNEL = int(os.environ.get("MESHTASTIC_CHANNEL", "0"))
 # Portnum values (from portnums.proto)
 PORTNUM_TEXT_MESSAGE = 1
 PORTNUM_NODEINFO = 4
-PORTNUM_TELEMETRY = 10
 PORTNUM_POSITION = 3
+PORTNUM_TELEMETRY = 67  # TELEMETRY_APP, not 10
 PORTNUM_ADMIN = 100
 
-# Mesh packet field numbers (from mesh.proto)
+# MeshPacket field numbers (from mesh.proto)
 PKT_FIELD_FROM = 1  # node id (uint32)
 PKT_FIELD_TO = 2    # node id (uint32)
 PKT_FIELD_CHANNEL = 3  # channel index (uint32)
-PKT_FIELD_DECRYPTED = 4  # bytes
+PKT_FIELD_DECODED = 4  # bytes (Data sub-message, was "decrypted")
 PKT_FIELD_ID = 5    # packet id (uint32)
-PKT_FIELD_PORTNUM = 6  # variant (Data enum)
-PKT_FIELD_PAYLOAD = 7  # bytes
+PKT_FIELD_RX_TIME = 9  # rx time (uint32)
+PKT_FIELD_HOP_LIMIT = 10  # hop limit (uint32)
+PKT_FIELD_PRIORITY = 11  # priority (uint32)
 
-# Service info field numbers
+# Data sub-message field numbers (from mesh.proto, inside MeshPacket.decoded)
+DATA_FIELD_PORTNUM = 1  # enum (was incorrectly 6)
+DATA_FIELD_PAYLOAD = 2  # bytes (was incorrectly 7)
+
+# FromRadio field numbers (from mesh.proto)
+# NOTE: These are DIFFERENT from what was originally coded!
+FROMRADIO_FIELD_ID = 1                # uint32 (FIFO tracking)
+FROMRADIO_FIELD_PACKET = 2            # MeshPacket (was 1)
+FROMRADIO_FIELD_MY_INFO = 3           # MyNodeInfo (was 2)
+FROMRADIO_FIELD_NODE_INFO = 4         # NodeInfo (was 3)
+FROMRADIO_FIELD_CONFIG = 5           # Config (was 5, was labeled telemetry)
+FROMRADIO_FIELD_LOG_RECORD = 6        # LogRecord (was 6, was labeled position)
+FROMRADIO_FIELD_CONFIG_COMPLETE_ID = 7  # uint32 (was 7, was labeled metadata)
+FROMRADIO_FIELD_REBOOTED = 8          # bool
+FROMRADIO_FIELD_MODULE_CONFIG = 9     # ModuleConfig
+FROMRADIO_FIELD_CHANNEL = 10          # Channel
+FROMRADIO_FIELD_METADATA = 13         # DeviceMetadata (was missing)
+
+# ToRadio field numbers
+TORADIO_FIELD_PACKET = 1             # MeshPacket
+TORADIO_FIELD_WANT_CONFIG = 2        # uint32 — triggers config dump
+
+# Service info field numbers (NodeInfo / User)
 SI_FIELD_NODE_NUM = 1  # uint32
 SI_FIELD_LONG_NAME = 2  # bytes
 SI_FIELD_SHORT_NAME = 3  # bytes
@@ -197,19 +221,191 @@ state = {
 state_lock = threading.Lock()
 
 
+def _parse_device_url():
+    """Parse DEVICE_URL into (host, port)."""
+    from urllib.parse import urlparse
+    parsed = urlparse(DEVICE_URL)
+    host = parsed.hostname or 'meshtastic.local'
+    port = parsed.port or 80
+    return host, port
+
+
+# Meshtastic StreamAPI TCP framing:
+# Byte 0-1: magic 0x94 0xC3
+# Byte 2-3: payload length (big-endian / network byte order)
+# Byte 4+: protobuf payload
+TCP_MAGIC = b'\x94\xc3'
+
+
+# Persistent TCP connection to the radio
+_tcp_socket = None
+_tcp_lock = threading.Lock()
+
+
+def _get_tcp_connection():
+    """Get or create a persistent TCP connection to the Meshtastic device."""
+    global _tcp_socket
+    if _tcp_socket is not None:
+        try:
+            _tcp_socket.getpeername()
+            return _tcp_socket
+        except:
+            _tcp_socket = None
+
+    host, port = _parse_device_url()
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(10)
+    s.connect((host, port))
+    _tcp_socket = s
+    return s
+
+
+def _read_tcp_frames(sock, timeout=5):
+    """Read StreamAPI-framed Meshtastic data from a persistent connection.
+    Each frame: magic(2) + big-endian-length(2) + protobuf payload.
+    Returns list of payload_bytes."""
+    frames = []
+    sock.settimeout(timeout)
+
+    try:
+        while True:
+            chunk = sock.recv(8192)
+            if not chunk:
+                break
+            # Parse all frames from buffer
+            buf = chunk
+            pos = 0
+            while pos < len(buf) - 3:
+                if buf[pos:pos+2] == TCP_MAGIC:
+                    # 2-byte big-endian length at pos+2
+                    length = struct.unpack('>H', buf[pos+2:pos+4])[0]
+                    payload_start = pos + 4
+                    if payload_start + length <= len(buf):
+                        payload = buf[payload_start:payload_start+length]
+                        frames.append(payload)
+                        pos = payload_start + length
+                    else:
+                        break
+                else:
+                    pos += 1
+            # Check for non-framed data (HTTP response or raw protobuf)
+            if not frames and buf:
+                if buf[:4] == b'HTTP':
+                    hdr_end = buf.find(b'\r\n\r\n')
+                    if hdr_end != -1:
+                        frames.append(buf[hdr_end+4:])
+                else:
+                    frames.append(buf)
+            break
+    except socket.timeout:
+        pass
+
+    return frames
+
+
+def _raw_tcp_request(path, method='GET', body=None, timeout=5):
+    """Legacy fallback — connect, send HTTP request, read one TCP frame.
+    Most devices should use the persistent connection via _get_tcp_connection."""
+    import socket
+    host, port = _parse_device_url()
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((host, port))
+        # Send HTTP-style request line — the device uses it as a trigger
+        req = f'{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n'
+        if body is not None:
+            req_bytes = req.encode('utf-8') + body
+        else:
+            req_bytes = req.encode('utf-8')
+        s.sendall(req_bytes)
+
+        # Read all available data
+        data = b''
+        while True:
+            try:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            except socket.timeout:
+                break
+        s.close()
+
+        if not data:
+            return 200, b''
+
+        # Check for TCP framing magic (0x94 0xc3)
+        if data[:2] == TCP_MAGIC:
+            # Strip framing: magic(2) + big-endian-length(2) + payload
+            length = struct.unpack('>H', data[2:4])[0]
+            payload = data[4:4+length]
+            return 200, payload
+
+        # Check for HTTP response
+        if data[:4] == b'HTTP':
+            header_end = data.find(b'\r\n\r\n')
+            if header_end != -1:
+                status_line = data[:data.find(b'\r\n')].decode('ascii', errors='replace')
+                status_code = int(status_line.split(' ')[1]) if ' ' in status_line else 200
+                return status_code, data[header_end+4:]
+            return 200, data
+
+        # Raw protobuf (no framing)
+        return 200, data
+    except socket.error:
+        try:
+            s.close()
+        except:
+            pass
+        raise
+
+
 def poll_from_radio():
-    """Poll the Meshtastic device for new data via HTTP API."""
+    """Poll the Meshtastic device for new data.
+    Tries HTTP API first, then falls back to TCP stream protocol.
+    For TCP devices, maintains a persistent connection and sends want_config
+    to request full device state."""
+    global _tcp_socket
+    # Try standard HTTP first (ESP32 HTTP API)
     url = f"{DEVICE_URL}/api/v1/fromradio?all=true"
     try:
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, timeout=5)
         if resp.status_code == 200:
             data = resp.content
             if data and len(data) > 0:
                 parse_from_radio_data(data)
             return True
         return False
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, Exception):
+        pass
+
+    # Fallback: TCP stream protocol (meshtasticd)
+    try:
+        with _tcp_lock:
+            sock = _get_tcp_connection()
+            # Send want_config to request full state
+            # ToRadio field 2 (want_config_response) = varint 1
+            want_config = encode_varint((TORADIO_FIELD_WANT_CONFIG << 3) | 0) + encode_varint(1)
+            # StreamAPI frame: magic(2) + big-endian-length(2) + payload
+            frame = TCP_MAGIC + struct.pack('>H', len(want_config)) + want_config
+            try:
+                sock.sendall(frame)
+            except (socket.error, BrokenPipeError):
+                # Reconnect
+                _tcp_socket = None
+                sock = _get_tcp_connection()
+                sock.sendall(frame)
+
+            # Read response frames
+            frames = _read_tcp_frames(sock, timeout=5)
+            for payload in frames:
+                if payload:
+                    parse_from_radio_data(payload)
+            return len(frames) > 0
+    except Exception as e:
         state['error'] = str(e)
+        _tcp_socket = None
         return False
 
 
@@ -235,20 +431,24 @@ def parse_from_radio_data(data):
             msg_data = data[new_offset:new_offset+length]
             offset = new_offset + length
 
-            # field_number 1 = packet
-            if field_number == 1:
+            # field 1 = id (uint32, FIFO tracking — skip)
+            # field 2 = packet (MeshPacket) — THIS is where packets live
+            if field_number == FROMRADIO_FIELD_PACKET:
                 parse_mesh_packet(msg_data)
-            # field_number 3 = nodeinfo
-            elif field_number == 3:
+            # field 3 = my_info (MyNodeInfo)
+            elif field_number == FROMRADIO_FIELD_MY_INFO:
+                parse_my_info(msg_data)
+            # field 4 = node_info (NodeInfo)
+            elif field_number == FROMRADIO_FIELD_NODE_INFO:
                 parse_node_info(msg_data)
-            # field_number 5 = telemetry
-            elif field_number == 5:
-                parse_telemetry(msg_data)
-            # field_number = 6 = position
-            elif field_number == 6:
-                parse_position_msg(msg_data)
-            # field_number = 7 = metadata
-            elif field_number == 7:
+            # field 5 = config
+            elif field_number == FROMRADIO_FIELD_CONFIG:
+                pass
+            # field 7 = config_complete_id (uint32)
+            elif field_number == FROMRADIO_FIELD_CONFIG_COMPLETE_ID:
+                pass
+            # field 13 = metadata (DeviceMetadata)
+            elif field_number == FROMRADIO_FIELD_METADATA:
                 parse_metadata(msg_data)
 
         except Exception as e:
@@ -264,18 +464,20 @@ def parse_mesh_packet(data):
             'to': get_field_value(fields, PKT_FIELD_TO),
             'channel': get_field_value(fields, PKT_FIELD_CHANNEL, 0),
             'id': get_field_value(fields, PKT_FIELD_ID),
+            'rx_time': get_field_value(fields, PKT_FIELD_RX_TIME),
+            'hop_limit': get_field_value(fields, PKT_FIELD_HOP_LIMIT),
             'timestamp': time.time(),
         }
 
-        # Decoded payload
-        decoded = get_field_value(fields, PKT_FIELD_DECRYPTED)
+        # Decoded payload (field 4 = Data sub-message)
+        decoded = get_field_value(fields, PKT_FIELD_DECODED)
         portnum = None
         payload_bytes = None
 
         if isinstance(decoded, bytes):
             sub_fields = parse_protobuf_fields(decoded)
-            portnum = get_field_value(sub_fields, PKT_FIELD_PORTNUM)
-            payload_bytes = get_field_value(sub_fields, PKT_FIELD_PAYLOAD)
+            portnum = get_field_value(sub_fields, DATA_FIELD_PORTNUM)
+            payload_bytes = get_field_value(sub_fields, DATA_FIELD_PAYLOAD)
 
         if portnum == PORTNUM_TEXT_MESSAGE and payload_bytes:
             text = safe_str(payload_bytes)
@@ -286,8 +488,36 @@ def parse_mesh_packet(data):
             if len(state['messages']) > 200:
                 state['messages'] = state['messages'][-200:]
 
+        elif portnum == PORTNUM_TELEMETRY and payload_bytes:
+            parse_telemetry(payload_bytes)
+
+        elif portnum == PORTNUM_POSITION and payload_bytes:
+            parse_position_msg(payload_bytes)
+
         elif portnum == PORTNUM_NODEINFO and payload_bytes:
             parse_node_info(payload_bytes)
+
+
+def parse_my_info(data):
+    """Parse a MyNodeInfo protobuf message (device self-info)."""
+    fields = parse_protobuf_fields(data)
+    with state_lock:
+        node_num = get_field_value(fields, 1)
+        if node_num is not None:
+            # Field 1 in MyNodeInfo is my_node_num (uint32, but might be 32-bit fixed)
+            if isinstance(node_num, float):
+                node_num = int(node_num)
+            state['device_info']['node_num'] = node_num
+            state['device_info']['node_id'] = '!%08x' % node_num if isinstance(node_num, int) else None
+        # Field 4 = channel_settings (count or list)
+        # Field 9 = hw_model (enum)
+        hw_model = get_field_value(fields, 9)
+        if hw_model is not None:
+            state['device_info']['hw_model'] = int(hw_model) if not isinstance(hw_model, int) else hw_model
+        # Field 11 = firmware_version
+        fw = get_field_value(fields, 11)
+        if isinstance(fw, bytes):
+            state['device_info']['firmware'] = safe_str(fw)
 
 
 def parse_node_info(data):
@@ -407,12 +637,12 @@ def send_text_message(text, channel=DEFAULT_CHANNEL, dest_node=None):
 
     # Portnum (field 3, wire type 2 = length-delimited within Data submessage)
     # Actually Data.portnum is a variant (enum) field 3, wire type 0
-    data_bytes += encode_varint((PKT_FIELD_PORTNUM << 3) | 0)  # field 6 in MeshPacket, but in Data it's field 3
+    data_bytes += encode_varint((DATA_FIELD_PORTNUM << 3) | 0)  # Data field 1 (portnum)
     data_bytes += encode_varint(PORTNUM_TEXT_MESSAGE)
 
-    # Payload (field 7 in MeshPacket, but in Data it's field 2)
+    # Payload (Data field 2, length-delimited)
     payload = text.encode('utf-8')
-    data_bytes += encode_varint((2 << 3) | 2)  # field 2, length-delimited
+    data_bytes += encode_varint((DATA_FIELD_PAYLOAD << 3) | 2)
     data_bytes += encode_varint(len(payload))
     data_bytes += payload
 
@@ -429,25 +659,44 @@ def send_text_message(text, channel=DEFAULT_CHANNEL, dest_node=None):
     packet += encode_varint((PKT_FIELD_CHANNEL << 3) | 0)
     packet += encode_varint(channel)
 
-    # Decrypted/decoded payload (field 4, length-delimited)
-    packet += encode_varint((PKT_FIELD_DECRYPTED << 3) | 2)
+    # Decoded Data payload (field 4, length-delimited)
+    packet += encode_varint((PKT_FIELD_DECODED << 3) | 2)
     packet += encode_varint(len(data_bytes))
     packet += data_bytes
 
     # Build ToRadio message (field 1 = packet)
     to_radio = bytearray()
-    to_radio += encode_varint((1 << 3) | 2)  # field 1, length-delimited
+    to_radio += encode_varint((TORADIO_FIELD_PACKET << 3) | 2)  # field 1, length-delimited
     to_radio += encode_varint(len(packet))
     to_radio += packet
 
+    # Try standard HTTP first
     url = f"{DEVICE_URL}/api/v1/toradio"
     try:
         resp = requests.put(url, data=bytes(to_radio),
                            headers={'Content-Type': 'application/x-protobuf'},
-                           timeout=10)
-        return resp.status_code == 200
-    except requests.exceptions.RequestException as e:
+                           timeout=5)
+        if resp.status_code == 200:
+            return True
+    except (requests.exceptions.RequestException, Exception):
+        pass
+    # Fallback: TCP stream protocol (meshtasticd)
+    global _tcp_socket
+    try:
+        with _tcp_lock:
+            sock = _get_tcp_connection()
+            # StreamAPI frame: magic(2) + big-endian-length(2) + payload
+            frame = TCP_MAGIC + struct.pack('>H', len(to_radio)) + bytes(to_radio)
+            try:
+                sock.sendall(frame)
+            except (socket.error, BrokenPipeError):
+                _tcp_socket = None
+                sock = _get_tcp_connection()
+                sock.sendall(frame)
+            return True
+    except Exception as e:
         state['error'] = str(e)
+        _tcp_socket = None
         return False
 
 
