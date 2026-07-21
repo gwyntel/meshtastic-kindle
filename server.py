@@ -51,6 +51,8 @@ state = {
     'messages': [],
     'channels': {},
     'device_info': {},
+    'net_stats': {},
+    'channel_url': None,
     'last_poll': 0,
     'connected': False,
     'error': None,
@@ -263,14 +265,40 @@ def sync_state_from_iface(iface):
 
             # Telemetry / device metrics
             if metrics:
-                node['telemetry'] = {
+                telem = {
                     'battery': metrics.get('batteryLevel'),
                     'voltage': metrics.get('voltage'),
                     'channel_util': metrics.get('channelUtilization'),
                     'air_util': metrics.get('airUtilTx'),
                 }
+                # Preserve env metrics from previous polls
+                with state_lock:
+                    existing_node = state['nodes'].get(node_id, {})
+                    existing_telem = existing_node.get('telemetry', {})
+                    for ek in ['temp', 'humidity', 'pressure', 'iaq']:
+                        if ek in existing_telem:
+                            telem[ek] = existing_telem[ek]
+                node['telemetry'] = telem
 
-            # Preserve any previously collected telemetry
+            # Environment metrics (if present)
+            env_metrics = nodeinfo.get('environmentMetrics', {}) if isinstance(nodeinfo, dict) else {}
+            if env_metrics:
+                if 'telemetry' not in node:
+                    node['telemetry'] = {}
+                if env_metrics.get('temperature') is not None:
+                    node['telemetry']['temp'] = env_metrics.get('temperature')
+                if env_metrics.get('relativeHumidity') is not None:
+                    node['telemetry']['humidity'] = env_metrics.get('relativeHumidity')
+                if env_metrics.get('barometricPressure') is not None:
+                    node['telemetry']['pressure'] = env_metrics.get('barometricPressure')
+                if env_metrics.get('iaq') is not None:
+                    node['telemetry']['iaq'] = env_metrics.get('iaq')
+
+            # Uptime
+            if metrics and metrics.get('uptimeSeconds'):
+                node['uptime'] = metrics.get('uptimeSeconds')
+
+            # Preserve any previously collected telemetry/position
             with state_lock:
                 existing = state['nodes'].get(node_id, {})
                 if 'telemetry' not in node and 'telemetry' in existing:
@@ -332,6 +360,36 @@ def sync_state_from_iface(iface):
         state['nodes'] = nodes
         state['channels'] = channels
         state['device_info'] = device_info
+
+    # Network stats (from local node's localStats telemetry)
+    try:
+        my_info = iface.getMyNodeInfo()
+        if my_info:
+            ls = my_info.get('localStats', {})
+            if ls:
+                net_stats = {
+                    'num_online': ls.get('numOnlineNodes'),
+                    'num_total': ls.get('numTotalNodes'),
+                    'packets_tx': ls.get('numPacketsTx'),
+                    'packets_rx': ls.get('numPacketsRx'),
+                    'packets_rx_bad': ls.get('numPacketsRxBad'),
+                    'noise_floor': ls.get('noiseFloor'),
+                    'heap_free': ls.get('heapFreeBytes'),
+                    'heap_total': ls.get('heapTotalBytes'),
+                }
+                with state_lock:
+                    state['net_stats'] = net_stats
+    except:
+        pass
+
+    # Channel URL
+    try:
+        if hasattr(iface, 'localNode') and iface.localNode:
+            url = iface.localNode.getURL(includeAll=False)
+            with state_lock:
+                state['channel_url'] = url
+    except:
+        pass
 
 
 def connect_to_radio():
@@ -435,6 +493,11 @@ class MeshtasticProxyHandler(http.server.SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == '/api/send':
             self.handle_send()
+        elif parsed.path == '/api/favorite':
+            self.handle_favorite()
+        elif parsed.path.startswith('/api/admin/'):
+            action = parsed.path.split('/')[-1]
+            self.handle_admin(action)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -467,6 +530,8 @@ class MeshtasticProxyHandler(http.server.SimpleHTTPRequestHandler):
                     'connected': state['connected'],
                     'device_url': DEVICE_URL,
                     'device_info': state['device_info'],
+                    'net_stats': state.get('net_stats', {}),
+                    'channel_url': state.get('channel_url'),
                     'last_poll': state['last_poll'],
                     'error': state['error'],
                     'node_count': len(state['nodes']),
@@ -551,6 +616,59 @@ class MeshtasticProxyHandler(http.server.SimpleHTTPRequestHandler):
 
         except json.JSONDecodeError:
             self.send_json({'ok': False, 'error': 'Invalid JSON'}, 400)
+
+    def handle_favorite(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length).decode('utf-8')
+        try:
+            data = json.loads(body)
+            node_id = data.get('node_id', '')
+            if not node_id or not node_id.startswith('!'):
+                self.send_json({'ok': False, 'error': 'Invalid node_id'}, 400)
+                return
+            if _iface is None or _iface.localNode is None:
+                self.send_json({'ok': False, 'error': 'Not connected'}, 503)
+                return
+            try:
+                node_num = int(node_id[1:], 16)
+                # Check current favorite status
+                nodes = _iface.nodes or {}
+                node_info = nodes.get(node_id, {})
+                is_fav = node_info.get('isFavorite', False)
+                if is_fav:
+                    _iface.localNode.removeFavorite(node_num)
+                else:
+                    _iface.localNode.setFavorite(node_num)
+                self.send_json({'ok': True, 'favorite': not is_fav})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)}, 500)
+        except json.JSONDecodeError:
+            self.send_json({'ok': False, 'error': 'Invalid JSON'}, 400)
+
+    def handle_admin(self, action):
+        if _iface is None or _iface.localNode is None:
+            self.send_json({'ok': False, 'error': 'Not connected'}, 503)
+            return
+        try:
+            if action == 'reboot':
+                _iface.localNode.reboot()
+                self.send_json({'ok': True, 'message': 'reboot sent'})
+            elif action == 'shutdown':
+                _iface.localNode.shutdown()
+                self.send_json({'ok': True, 'message': 'shutdown sent'})
+            elif action == 'reset-nodedb':
+                _iface.localNode.resetNodeDb()
+                self.send_json({'ok': True, 'message': 'nodedb reset sent'})
+            elif action == 'factory-reset':
+                _iface.localNode.factoryReset(full=False)
+                self.send_json({'ok': True, 'message': 'factory reset sent'})
+            elif action == 'enter-dfu':
+                _iface.localNode.enterDFUMode()
+                self.send_json({'ok': True, 'message': 'DFU mode sent'})
+            else:
+                self.send_json({'ok': False, 'error': 'Unknown action: ' + action}, 400)
+        except Exception as e:
+            self.send_json({'ok': False, 'error': str(e)}, 500)
 
 
 def main():

@@ -10,24 +10,19 @@
 </head>
 <body>
   <div class="app" id="app">
-    <header class="header">
-      <div class="header-title">mesh-kindle</div>
-      <div class="header-actions">
-        <button class="btn btn-icon" id="refreshBtn" aria-label="refresh">&#8635;</button>
-        <button class="btn btn-icon" id="settingsBtn" aria-label="settings">...</button>
-      </div>
-    </header>
-
     <nav class="tabs">
       <button class="tab active" data-tab="messages">messages</button>
       <button class="tab" data-tab="channels">channels</button>
       <button class="tab" data-tab="nodes">nodes</button>
-      <button class="tab" data-tab="map">map</button>
+      <button class="tab" data-tab="settings">config</button>
     </nav>
 
     <div class="tab-content" id="tabContent">
       <!-- Messages tab -->
       <div class="tab-panel active" id="panel-messages">
+        <div class="filter-bar" id="msgFilterBar">
+          <input type="text" class="filter-input" id="msgSearch" placeholder="search messages...">
+        </div>
         <div class="message-list" id="messageList">
           <div class="empty-state">
             <div class="empty-title">no messages</div>
@@ -36,18 +31,13 @@
         </div>
       </div>
 
-      <!-- Nodes tab -->
-      <div class="tab-panel" id="panel-nodes">
-        <div class="node-list" id="nodeList">
-          <div class="empty-state">
-            <div class="empty-title">no nodes</div>
-            <div class="empty-sub">no nodes discovered yet</div>
-          </div>
-        </div>
-      </div>
-
       <!-- Channels tab -->
       <div class="tab-panel" id="panel-channels">
+        <div class="filter-bar" id="chFilterBar">
+          <button class="filter-btn active" data-chfilter="all">all</button>
+          <button class="filter-btn" data-chfilter="active">active</button>
+          <button class="filter-btn" data-chfilter="disabled">disabled</button>
+        </div>
         <div class="channel-list" id="channelList">
           <div class="empty-state">
             <div class="empty-title">no channels</div>
@@ -56,12 +46,97 @@
         </div>
       </div>
 
-      <!-- Map tab -->
-      <div class="tab-panel" id="panel-map">
-        <div class="position-list" id="positionList">
+      <!-- Nodes tab -->
+      <div class="tab-panel" id="panel-nodes">
+        <div class="filter-bar" id="nodeFilterBar">
+          <input type="text" class="filter-input" id="nodeSearch" placeholder="search nodes...">
+          <select class="filter-select" id="nodeRoleFilter">
+            <option value="all">all roles</option>
+            <option value="CLIENT">client</option>
+            <option value="CLIENT_MUTE">mute</option>
+            <option value="ROUTER">router</option>
+            <option value="ROUTER_CLIENT">rtr-cli</option>
+            <option value="REPEATER">repeater</option>
+            <option value="TRACKER">tracker</option>
+            <option value="SENSOR">sensor</option>
+          </select>
+          <select class="filter-select" id="nodeSort">
+            <option value="name">name</option>
+            <option value="last_heard">recent</option>
+            <option value="snr">snr</option>
+            <option value="hops">hops</option>
+            <option value="distance">distance</option>
+          </select>
+          <button class="filter-btn" id="favOnlyBtn">fav</button>
+        </div>
+        <div class="node-list" id="nodeList">
           <div class="empty-state">
-            <div class="empty-title">no positions</div>
-            <div class="empty-sub">no position data available</div>
+            <div class="empty-title">no nodes</div>
+            <div class="empty-sub">no nodes discovered yet</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings tab -->
+      <div class="tab-panel" id="panel-settings">
+        <div class="settings-content">
+          <div class="settings-section">
+            <div class="settings-section-title">connection</div>
+            <div class="settings-row">
+              <label class="settings-label">device url</label>
+              <input type="text" class="settings-input" id="deviceUrlInput" placeholder="http://meshtastic.local">
+            </div>
+            <div class="settings-row">
+              <label class="settings-label">channel</label>
+              <input type="number" class="settings-input" id="channelInput" value="0" min="0" max="7">
+            </div>
+            <div class="settings-row">
+              <label class="settings-label">poll interval (seconds)</label>
+              <input type="number" class="settings-input" id="pollInput" value="2" min="1" max="60">
+            </div>
+            <div class="settings-actions">
+              <button class="btn" id="testConnBtn">test</button>
+              <button class="btn btn-key" id="saveSettingsBtn">save</button>
+            </div>
+            <div class="settings-info" id="settingsInfo"></div>
+          </div>
+
+          <div class="settings-section">
+            <div class="settings-section-title">device info</div>
+            <div class="info-grid" id="deviceInfoGrid">
+              <div class="info-empty">no device connected</div>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <div class="settings-section-title">network stats</div>
+            <div class="info-grid" id="netStatsGrid">
+              <div class="info-empty">no stats available</div>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <div class="settings-section-title">channel url</div>
+            <div class="info-grid" id="channelUrlBox">
+              <div class="info-empty">no url available</div>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <div class="settings-section-title">admin</div>
+            <div class="admin-actions">
+              <button class="btn" id="rebootBtn">reboot</button>
+              <button class="btn" id="shutdownBtn">shutdown</button>
+              <button class="btn" id="resetNodesBtn">reset nodedb</button>
+            </div>
+            <div class="settings-info" id="adminInfo"></div>
+          </div>
+
+          <div class="settings-section">
+            <div class="settings-section-title">appearance</div>
+            <div class="admin-actions">
+              <button class="btn" id="themeBtn">toggle dark mode</button>
+            </div>
           </div>
         </div>
       </div>
@@ -72,36 +147,10 @@
         <input type="text" class="input-field" id="inputField" placeholder="broadcast..." maxlength="200">
         <button class="btn btn-key" id="sendBtn">send</button>
       </div>
+      <div class="dm-target" id="dmTarget"></div>
     </div>
 
     <div class="status-bar" id="statusBar">connecting...</div>
-  </div>
-
-  <!-- Settings overlay -->
-  <div class="overlay" id="settingsOverlay">
-    <div class="settings-panel">
-      <div class="settings-header">
-        <div class="settings-title">settings</div>
-        <button class="btn btn-icon" id="closeSettings">x</button>
-      </div>
-      <div class="settings-group">
-        <label class="settings-label">device url</label>
-        <input type="text" class="settings-input" id="deviceUrlInput" placeholder="http://meshtastic.local">
-      </div>
-      <div class="settings-group">
-        <label class="settings-label">channel</label>
-        <input type="number" class="settings-input" id="channelInput" value="0" min="0" max="7">
-      </div>
-      <div class="settings-group">
-        <label class="settings-label">poll interval (seconds)</label>
-        <input type="number" class="settings-input" id="pollInput" value="2" min="1" max="60">
-      </div>
-      <div class="settings-actions">
-        <button class="btn" id="testConnBtn">test</button>
-        <button class="btn btn-key" id="saveSettingsBtn">save</button>
-      </div>
-      <div class="settings-info" id="settingsInfo"></div>
-    </div>
   </div>
 
   <script src="app.js"></script>
