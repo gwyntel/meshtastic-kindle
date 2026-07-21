@@ -2,786 +2,409 @@
 """
 Meshtastic Kindle Client - Proxy Server
 
-Handles protobuf communication with Meshtastic devices over HTTP,
-exposes a simple JSON API for the Kindle e-ink browser frontend.
-
-The Kindle browser can't handle protobufs or complex JS — this proxy
-does all the heavy lifting and returns clean JSON.
+Uses the official meshtastic Python library for device communication.
+Exposes a simple JSON API for the Kindle e-ink browser frontend.
 """
 
 import http.server
 import json
 import os
-import socket
-import struct
 import sys
 import threading
 import time
 import urllib.parse
 from http import HTTPStatus
 from pathlib import Path
+from urllib.parse import urlparse
 
 try:
-    import requests
+    from meshtastic.tcp_interface import TCPInterface
+    from meshtastic.mesh_interface import MeshInterface
+    from pubsub import pub
 except ImportError:
-    print("[!] requests not installed. Install with: pip install requests")
+    print("[!] meshtastic library not installed. Install with: pip install meshtastic")
     sys.exit(1)
 
 # --- CONFIG ---
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8645
 DEVICE_URL = os.environ.get("MESHTASTIC_URL", "http://meshtastic.local")
-POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "2.0"))
+POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "5.0"))
 DEFAULT_CHANNEL = int(os.environ.get("MESHTASTIC_CHANNEL", "0"))
 
-# --- PROTOBUF HELPERS ---
-# We use raw protobuf field encoding since we can't depend on generated code.
-# Meshtastic uses protobuf3 with specific field numbers from their .proto files.
-
-# Portnum values (from portnums.proto)
-PORTNUM_TEXT_MESSAGE = 1
-PORTNUM_NODEINFO = 4
-PORTNUM_POSITION = 3
-PORTNUM_TELEMETRY = 67  # TELEMETRY_APP, not 10
-PORTNUM_ADMIN = 100
-
-# MeshPacket field numbers (from mesh.proto)
-PKT_FIELD_FROM = 1  # node id (uint32)
-PKT_FIELD_TO = 2    # node id (uint32)
-PKT_FIELD_CHANNEL = 3  # channel index (uint32)
-PKT_FIELD_DECODED = 4  # bytes (Data sub-message, was "decrypted")
-PKT_FIELD_ID = 5    # packet id (uint32)
-PKT_FIELD_RX_TIME = 9  # rx time (uint32)
-PKT_FIELD_HOP_LIMIT = 10  # hop limit (uint32)
-PKT_FIELD_PRIORITY = 11  # priority (uint32)
-
-# Data sub-message field numbers (from mesh.proto, inside MeshPacket.decoded)
-DATA_FIELD_PORTNUM = 1  # enum (was incorrectly 6)
-DATA_FIELD_PAYLOAD = 2  # bytes (was incorrectly 7)
-
-# FromRadio field numbers (from mesh.proto)
-# NOTE: These are DIFFERENT from what was originally coded!
-FROMRADIO_FIELD_ID = 1                # uint32 (FIFO tracking)
-FROMRADIO_FIELD_PACKET = 2            # MeshPacket (was 1)
-FROMRADIO_FIELD_MY_INFO = 3           # MyNodeInfo (was 2)
-FROMRADIO_FIELD_NODE_INFO = 4         # NodeInfo (was 3)
-FROMRADIO_FIELD_CONFIG = 5           # Config (was 5, was labeled telemetry)
-FROMRADIO_FIELD_LOG_RECORD = 6        # LogRecord (was 6, was labeled position)
-FROMRADIO_FIELD_CONFIG_COMPLETE_ID = 7  # uint32 (was 7, was labeled metadata)
-FROMRADIO_FIELD_REBOOTED = 8          # bool
-FROMRADIO_FIELD_MODULE_CONFIG = 9     # ModuleConfig
-FROMRADIO_FIELD_CHANNEL = 10          # Channel
-FROMRADIO_FIELD_METADATA = 13         # DeviceMetadata (was missing)
-
-# ToRadio field numbers
-TORADIO_FIELD_PACKET = 1             # MeshPacket
-TORADIO_FIELD_WANT_CONFIG = 2        # uint32 — triggers config dump
-
-# Service info field numbers (NodeInfo / User)
-SI_FIELD_NODE_NUM = 1  # uint32
-SI_FIELD_LONG_NAME = 2  # bytes
-SI_FIELD_SHORT_NAME = 3  # bytes
-SI_FIELD_ROLE = 4  # enum
-
-# Telemetry field numbers (from telemetry.proto)
-TELEM_FIELD_BATTERY = 1  # uint32 (battery level %)
-TELEM_FIELD_VOLTAGE = 2  # float
-TELEM_FIELD_CHANNEL_UTIL = 3  # float
-TELEM_FIELD_AIR_UTIL = 4  # float
-TELEM_FIELD_BARO = 5  # float
-TELEM_FIELD_TEMP = 6  # float
-TELEM_FIELD_HUMIDITY = 7  # float
-
-# Position field numbers
-POS_FIELD_LAT = 1  # sint32 (1e-7)
-POS_FIELD_LON = 2  # sint32 (1e-7)
-POS_FIELD_ALT = 3  # int32
-
-# Channel field numbers (from channel.proto)
-CHANNEL_FIELD_INDEX = 1   # uint32 (channel index 0-7)
-CHANNEL_FIELD_SETTINGS = 2  # ChannelSettings sub-message
-
-# ChannelSettings field numbers (inside Channel.settings)
-CH_SETTINGS_NAME = 1       # bytes (channel name)
-CH_SETTINGS_ROLE = 3      # enum (0=DISABLED,1=PRIMARY,2=SECONDARY)
-CH_SETTINGS_PSK = 4        # bytes (pre-shared key, usually empty for virtual)
-CH_SETTINGS_UPLINK = 5     # bool
-CH_SETTINGS_DOWNLINK = 6   # bool
-
-
-def encode_varint(value):
-    """Encode an unsigned integer as a protobuf varint."""
-    result = bytearray()
-    while value > 0x7F:
-        result.append((value & 0x7F) | 0x80)
-        value >>= 7
-    result.append(value & 0x7F)
-    return bytes(result)
-
-
-def decode_varint(data, offset=0):
-    """Decode a protobuf varint. Returns (value, new_offset)."""
-    result = 0
-    shift = 0
-    while offset < len(data):
-        byte = data[offset]
-        result |= (byte & 0x7F) << shift
-        offset += 1
-        if not (byte & 0x80):
-            break
-        shift += 7
-    return result, offset
-
-
-def encode_zigzag32(value):
-    """Encode a signed int32 as zigzag."""
-    return (value << 1) ^ (value >> 31) & 0xFFFFFFFF
-
-
-def decode_zigzag32(value):
-    """Decode a zigzag-encoded int32."""
-    return (value >> 1) ^ -(value & 1)
-
-
-def parse_protobuf_fields(data):
-    """Parse raw protobuf fields from binary data.
-    Returns a dict: {field_number: (wire_type, value_bytes)}
-    For repeated fields, returns a list of values.
-    """
-    fields = {}
-    offset = 0
-    while offset < len(data):
-        try:
-            tag, offset = decode_varint(data, offset)
-        except Exception:
-            break
-        field_number = tag >> 3
-        wire_type = tag & 0x07
-
-        if wire_type == 0:  # Varint
-            value, offset = decode_varint(data, offset)
-            key = field_number
-            if key in fields and isinstance(fields[key], list):
-                fields[key].append(value)
-            elif key in fields:
-                fields[key] = [fields[key], value]
-            else:
-                fields[key] = value
-        elif wire_type == 1:  # 64-bit
-            if offset + 8 <= len(data):
-                value = struct.unpack('<d', data[offset:offset+8])[0]
-                offset += 8
-                fields[field_number] = value
-            else:
-                break
-        elif wire_type == 2:  # Length-delimited (bytes/string/sub-message)
-            length, offset = decode_varint(data, offset)
-            if offset + length <= len(data):
-                value = data[offset:offset+length]
-                offset += length
-                key = field_number
-                if key in fields and isinstance(fields[key], list):
-                    fields[key].append(value)
-                elif key in fields:
-                    fields[key] = [fields[key], value]
-                else:
-                    fields[key] = value
-            else:
-                break
-        elif wire_type == 5:  # 32-bit
-            if offset + 4 <= len(data):
-                value = struct.unpack('<f', data[offset:offset+4])[0]
-                offset += 4
-                fields[field_number] = value
-            else:
-                break
-        else:
-            break  # Unknown wire type, stop
-
-    return fields
-
-
-def safe_str(data):
-    """Safely decode bytes to string."""
-    if isinstance(data, bytes):
-        try:
-            return data.decode('utf-8', errors='replace').rstrip('\x00')
-        except Exception:
-            return data.hex()
-    return str(data) if data else ''
-
-
-def get_field_value(fields, field_num, default=None):
-    """Get a single value from a protobuf field dict (handles lists)."""
-    val = fields.get(field_num, default)
-    if isinstance(val, list):
-        return val[0] if val else default
-    return val
+# Parse hostname and port from DEVICE_URL
+# Accepts: http://host:port, host:port, or host
+def _parse_device_url():
+    url = DEVICE_URL
+    if url.startswith("http://"):
+        url = url[7:]
+    elif url.startswith("https://"):
+        url = url[8:]
+    if ":" in url:
+        host, port_str = url.rsplit(":", 1)
+        return host, int(port_str)
+    return url, 4403
 
 
 # --- STATE ---
 state = {
-    'nodes': {},        # node_num -> {long_name, short_name, role, last_heard}
-    'messages': [],      # list of {id, from, to, channel, text, timestamp}
-    'telemetry': {},     # node_num -> {battery, voltage, temp, ...}
-    'positions': {},     # node_num -> {lat, lon, alt}
-    'channels': {},      # channel_index -> {index, name, role, uplink, downlink}
-    'device_info': {},   # device metadata
+    'nodes': {},
+    'messages': [],
+    'channels': {},
+    'device_info': {},
     'last_poll': 0,
     'connected': False,
     'error': None,
 }
 state_lock = threading.Lock()
 
+# --- MESHTASTIC INTERFACE ---
+_iface = None
+_iface_lock = threading.Lock()
 
-def _parse_device_url():
-    """Parse DEVICE_URL into (host, port)."""
-    from urllib.parse import urlparse
-    parsed = urlparse(DEVICE_URL)
-    host = parsed.hostname or 'meshtastic.local'
-    port = parsed.port or 80
-    return host, port
+# Role name lookup
+ROLE_NAMES = {
+    0: 'DISABLED',
+    1: 'PRIMARY',
+    2: 'SECONDARY',
+}
+
+# HW model lookup (common ones)
+HW_MODELS = {
+    0: 'UNSET',
+    1: 'TLORA_V2',
+    2: 'TLORA_V1',
+    3: 'TLORA_V2_1_1P6',
+    4: 'TBEAM',
+    5: 'HELTEC_V2_0',
+    6: 'TBEAM_V0P7',
+    7: 'T_ECHO',
+    8: 'LILYGO_TBEAM_S3_CORE',
+    9: 'RAK4631',
+    10: 'HELTEC_V3',
+    11: 'HELTEC_V1',
+    12: 'LILYGO_TLORA_V2_1_1P6',
+    13: 'HELTEC_V2_1',
+    14: 'HELTEC_WIRELESS_TRACKER',
+    15: 'LILYGO_TBEAM_V1P1',
+    16: 'STATION_G1',
+    17: 'RAK11200',
+    18: 'PORTDUINO',
+    19: 'LILYGO_TLORA_V1_3',
+    20: 'PRIVACY_KEYBOARD',
+    21: 'HELTEC_WIRELESS_PAPER',
+    22: 'HELTEC_WIRELESS_PAPER_V1',
+    23: 'T_DECK',
+    24: 'T_WATCH',
+    25: 'PICOMPUTER_S3',
+    26: 'HELTEC_V3',
+    27: 'HELTEC_WSL_V3',
+    28: 'HELTEC_BRIEF',
+    29: 'LILYGO_TLORA_T3_S3',
+    30: 'RAK3172',
+    31: 'WIPHONE',
+    32: 'HELTEC_HT62',
+    33: 'SEEED_XIAO_S3',
+    34: 'SEEED_SOLAR_NODE',
+    35: 'TRACKER_T1000_E',
+    36: 'RAK3172',
+    37: 'MESHAB',
+    38: 'DELTA5',
+    39: 'HELTEC_MESH_NODE_T114',
+    40: 'CROWPANEL',
+    41: 'WISMESH_TAB',
+    42: 'WISMESH_TAG',
+    43: 'RAK4631',
+    44: 'RAK4631',
+    45: 'RAK4631',
+    46: 'RAK4631',
+    47: 'RAK4631',
+    48: 'RAK4631',
+    49: 'M5STACK_CORE2',
+    50: 'RAK14001',
+    51: 'WISMESH_S3',
+    254: 'PRIVATE_HW',
+}
 
 
-# Meshtastic StreamAPI TCP framing:
-# Byte 0-1: magic 0x94 0xC3
-# Byte 2-3: payload length (big-endian / network byte order)
-# Byte 4+: protobuf payload
-TCP_MAGIC = b'\x94\xc3'
+def get_hw_model_name(hw_model):
+    """Get human-readable hardware model name."""
+    if hw_model is None:
+        return ''
+    # It might be an enum value or string
+    if isinstance(hw_model, str):
+        return hw_model
+    return HW_MODELS.get(hw_model, str(hw_model))
 
 
-# Persistent TCP connection to the radio
-_tcp_socket = None
-_tcp_lock = threading.Lock()
-
-
-def _get_tcp_connection():
-    """Get or create a persistent TCP connection to the Meshtastic device."""
-    global _tcp_socket
-    if _tcp_socket is not None:
-        try:
-            _tcp_socket.getpeername()
-            return _tcp_socket
-        except:
-            _tcp_socket = None
-
-    host, port = _parse_device_url()
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(10)
-    s.connect((host, port))
-    _tcp_socket = s
-    return s
-
-
-def _read_tcp_frames(sock, timeout=5):
-    """Read StreamAPI-framed Meshtastic data from a persistent connection.
-    Each frame: magic(2) + big-endian-length(2) + protobuf payload.
-    Returns list of payload_bytes."""
-    frames = []
-    sock.settimeout(timeout)
-
+def on_receive(packet, interface=None):
+    """Callback for received packets from the radio (via pubsub)."""
     try:
-        while True:
-            chunk = sock.recv(8192)
-            if not chunk:
-                break
-            # Parse all frames from buffer
-            buf = chunk
-            pos = 0
-            while pos < len(buf) - 3:
-                if buf[pos:pos+2] == TCP_MAGIC:
-                    # 2-byte big-endian length at pos+2
-                    length = struct.unpack('>H', buf[pos+2:pos+4])[0]
-                    payload_start = pos + 4
-                    if payload_start + length <= len(buf):
-                        payload = buf[payload_start:payload_start+length]
-                        frames.append(payload)
-                        pos = payload_start + length
-                    else:
-                        break
-                else:
-                    pos += 1
-            # Check for non-framed data (HTTP response or raw protobuf)
-            if not frames and buf:
-                if buf[:4] == b'HTTP':
-                    hdr_end = buf.find(b'\r\n\r\n')
-                    if hdr_end != -1:
-                        frames.append(buf[hdr_end+4:])
-                else:
-                    frames.append(buf)
-            break
-    except socket.timeout:
-        pass
+        decoded = packet.get('decoded', {})
+        portnum = decoded.get('portnum', '')
+        payload = decoded.get('payload', b'')
+        from_id = packet.get('from')
+        to_id = packet.get('to')
+        channel = packet.get('channel', 0)
+        rx_time = packet.get('rxTime', packet.get('rx_time', 0))
 
-    return frames
+        if not from_id:
+            return
 
+        from_hex = '!%08x' % from_id if isinstance(from_id, int) else str(from_id)
 
-def _raw_tcp_request(path, method='GET', body=None, timeout=5):
-    """Legacy fallback — connect, send HTTP request, read one TCP frame.
-    Most devices should use the persistent connection via _get_tcp_connection."""
-    import socket
-    host, port = _parse_device_url()
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        s.connect((host, port))
-        # Send HTTP-style request line — the device uses it as a trigger
-        req = f'{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n'
-        if body is not None:
-            req_bytes = req.encode('utf-8') + body
-        else:
-            req_bytes = req.encode('utf-8')
-        s.sendall(req_bytes)
+        if portnum == 'TEXT_MESSAGE_APP':
+            text = ''
+            if isinstance(payload, bytes):
+                text = payload.decode('utf-8', errors='replace')
+            elif isinstance(payload, str):
+                text = payload
 
-        # Read all available data
-        data = b''
-        while True:
-            try:
-                chunk = s.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-            except socket.timeout:
-                break
-        s.close()
+            msg = {
+                'from': from_hex,
+                'from_num': from_id,
+                'to': '!%08x' % to_id if isinstance(to_id, int) else str(to_id),
+                'channel': channel,
+                'text': text,
+                'timestamp': rx_time or int(time.time()),
+            }
+            with state_lock:
+                state['messages'].append(msg)
+                if len(state['messages']) > 100:
+                    state['messages'] = state['messages'][-100:]
 
-        if not data:
-            return 200, b''
-
-        # Check for TCP framing magic (0x94 0xc3)
-        if data[:2] == TCP_MAGIC:
-            # Strip framing: magic(2) + big-endian-length(2) + payload
-            length = struct.unpack('>H', data[2:4])[0]
-            payload = data[4:4+length]
-            return 200, payload
-
-        # Check for HTTP response
-        if data[:4] == b'HTTP':
-            header_end = data.find(b'\r\n\r\n')
-            if header_end != -1:
-                status_line = data[:data.find(b'\r\n')].decode('ascii', errors='replace')
-                status_code = int(status_line.split(' ')[1]) if ' ' in status_line else 200
-                return status_code, data[header_end+4:]
-            return 200, data
-
-        # Raw protobuf (no framing)
-        return 200, data
-    except socket.error:
-        try:
-            s.close()
-        except:
+        elif portnum == 'NODEINFO_APP':
+            # Node info updates come through automatically via iface.nodes
             pass
-        raise
+
+        elif portnum == 'TELEMETRY_APP':
+            # Telemetry is embedded in the packet
+            telemetry = decoded.get('telemetry', {})
+            if telemetry:
+                metrics = {}
+                if 'deviceMetrics' in telemetry:
+                    dm = telemetry['deviceMetrics']
+                    metrics['battery'] = dm.get('batteryLevel')
+                    metrics['voltage'] = dm.get('voltage')
+                    metrics['channel_util'] = dm.get('channelUtilization')
+                    metrics['air_util'] = dm.get('airUtilTx')
+                if 'environmentMetrics' in telemetry:
+                    em = telemetry['environmentMetrics']
+                    metrics['temp'] = em.get('temperature')
+                    metrics['humidity'] = em.get('relativeHumidity')
+                if metrics and from_hex:
+                    with state_lock:
+                        existing = state['nodes'].get(from_hex, {})
+                        existing['telemetry'] = metrics
+                        state['nodes'][from_hex] = existing
+
+        elif portnum == 'POSITION_APP':
+            position = decoded.get('position', {})
+            if position:
+                pos = {}
+                if 'latitude' in position:
+                    pos['lat'] = position['latitude']
+                elif 'latitudeI' in position:
+                    pos['lat'] = position['latitudeI'] * 1e-7
+                if 'longitude' in position:
+                    pos['lon'] = position['longitude']
+                elif 'longitudeI' in position:
+                    pos['lon'] = position['longitudeI'] * 1e-7
+                if 'altitude' in position:
+                    pos['alt'] = position['altitude']
+                if pos and from_hex:
+                    with state_lock:
+                        existing = state['nodes'].get(from_hex, {})
+                        existing['position'] = pos
+                        state['nodes'][from_hex] = existing
+
+    except Exception as e:
+        print(f"[!] Error in on_receive: {e}", file=sys.stderr)
 
 
-def poll_from_radio():
-    """Poll the Meshtastic device for new data.
-    Tries HTTP API first, then falls back to TCP stream protocol.
-    For TCP devices, maintains a persistent connection and sends want_config
-    to request full device state."""
-    global _tcp_socket
-    # Try standard HTTP first (ESP32 HTTP API)
-    url = f"{DEVICE_URL}/api/v1/fromradio?all=true"
+def sync_state_from_iface(iface):
+    """Pull current state from the meshtastic interface into our state dict."""
+    # Nodes
+    nodes = {}
+    if iface.nodes:
+        for node_id, nodeinfo in iface.nodes.items():
+            if not isinstance(nodeinfo, dict):
+                continue
+            user = nodeinfo.get('user', {}) if isinstance(nodeinfo, dict) else {}
+            position = nodeinfo.get('position', {}) if isinstance(nodeinfo, dict) else {}
+            metrics = nodeinfo.get('deviceMetrics', {}) if isinstance(nodeinfo, dict) else {}
+
+            node = {
+                'id': node_id,
+                'long_name': user.get('longName', ''),
+                'short_name': user.get('shortName', ''),
+                'role': user.get('role', ''),
+                'hw_model': user.get('hwModel', ''),
+                'last_heard': nodeinfo.get('lastHeard', 0),
+                'snr': nodeinfo.get('snr'),
+                'hops_away': nodeinfo.get('hopsAway'),
+                'via_mqtt': nodeinfo.get('viaMqtt', False),
+                'is_favorite': nodeinfo.get('isFavorite', False),
+            }
+
+            # Position
+            if position:
+                if 'latitude' in position:
+                    node['position'] = {
+                        'lat': position.get('latitude'),
+                        'lon': position.get('longitude'),
+                        'alt': position.get('altitude'),
+                    }
+                elif 'latitudeI' in position:
+                    node['position'] = {
+                        'lat': position.get('latitudeI', 0) * 1e-7,
+                        'lon': position.get('longitudeI', 0) * 1e-7,
+                        'alt': position.get('altitude'),
+                    }
+
+            # Telemetry / device metrics
+            if metrics:
+                node['telemetry'] = {
+                    'battery': metrics.get('batteryLevel'),
+                    'voltage': metrics.get('voltage'),
+                    'channel_util': metrics.get('channelUtilization'),
+                    'air_util': metrics.get('airUtilTx'),
+                }
+
+            # Preserve any previously collected telemetry
+            with state_lock:
+                existing = state['nodes'].get(node_id, {})
+                if 'telemetry' not in node and 'telemetry' in existing:
+                    node['telemetry'] = existing['telemetry']
+                if 'position' not in node and 'position' in existing:
+                    node['position'] = existing['position']
+
+            nodes[node_id] = node
+
+    # Channels
+    channels = {}
+    if hasattr(iface, '_localChannels'):
+        for ch in iface._localChannels:
+            idx = ch.index
+            name = ''
+            role = ROLE_NAMES.get(ch.role, 'UNKNOWN')
+            uplink = False
+            downlink = False
+            if ch.HasField('settings'):
+                s = ch.settings
+                name = s.name if s.name else 'ch' + str(idx)
+                uplink = s.uplink_enabled
+                downlink = s.downlink_enabled
+            if not name:
+                name = 'ch' + str(idx)
+            channels[idx] = {
+                'index': idx,
+                'name': name,
+                'role': role,
+                'uplink_enabled': uplink,
+                'downlink_enabled': downlink,
+            }
+
+    # Device info
+    device_info = {}
     try:
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            data = resp.content
-            if data and len(data) > 0:
-                parse_from_radio_data(data)
-            return True
-        return False
-    except (requests.exceptions.RequestException, Exception):
+        my_info = iface.getMyNodeInfo()
+        if my_info:
+            user = my_info.get('user', {})
+            device_info['node_id'] = user.get('id', '')
+            device_info['long_name'] = user.get('longName', '')
+            device_info['short_name'] = user.get('shortName', '')
+            device_info['hw_model'] = user.get('hwModel', '')
+            device_info['role'] = user.get('role', '')
+            device_info['node_num'] = my_info.get('num')
+    except:
         pass
 
-    # Fallback: TCP stream protocol (meshtasticd)
+    # Metadata
     try:
-        with _tcp_lock:
-            sock = _get_tcp_connection()
-            # Send want_config to request full state
-            # ToRadio field 2 (want_config_response) = varint 1
-            want_config = encode_varint((TORADIO_FIELD_WANT_CONFIG << 3) | 0) + encode_varint(1)
-            # StreamAPI frame: magic(2) + big-endian-length(2) + payload
-            frame = TCP_MAGIC + struct.pack('>H', len(want_config)) + want_config
-            try:
-                sock.sendall(frame)
-            except (socket.error, BrokenPipeError):
-                # Reconnect
-                _tcp_socket = None
-                sock = _get_tcp_connection()
-                sock.sendall(frame)
-
-            # Read response frames
-            frames = _read_tcp_frames(sock, timeout=5)
-            for payload in frames:
-                if payload:
-                    parse_from_radio_data(payload)
-            return len(frames) > 0
-    except Exception as e:
-        state['error'] = str(e)
-        _tcp_socket = None
-        return False
-
-
-def parse_from_radio_data(data):
-    """Parse FromRadio protobuf data.
-    FromRadio is a repeating stream of protobuf messages.
-    Each message is a FromRadio with a single oneof field.
-    """
-    offset = 0
-    while offset < len(data):
-        try:
-            tag, new_offset = decode_varint(data, offset)
-            field_number = tag >> 3
-            wire_type = tag & 0x07
-
-            if wire_type != 2:
-                break
-
-            length, new_offset = decode_varint(data, new_offset)
-            if new_offset + length > len(data):
-                break
-
-            msg_data = data[new_offset:new_offset+length]
-            offset = new_offset + length
-
-            # field 1 = id (uint32, FIFO tracking — skip)
-            # field 2 = packet (MeshPacket) — THIS is where packets live
-            if field_number == FROMRADIO_FIELD_PACKET:
-                parse_mesh_packet(msg_data)
-            # field 3 = my_info (MyNodeInfo)
-            elif field_number == FROMRADIO_FIELD_MY_INFO:
-                parse_my_info(msg_data)
-            # field 4 = node_info (NodeInfo)
-            elif field_number == FROMRADIO_FIELD_NODE_INFO:
-                parse_node_info(msg_data)
-            # field 5 = config
-            elif field_number == FROMRADIO_FIELD_CONFIG:
-                pass
-            # field 7 = config_complete_id (uint32)
-            elif field_number == FROMRADIO_FIELD_CONFIG_COMPLETE_ID:
-                pass
-            # field 13 = metadata (DeviceMetadata)
-            elif field_number == FROMRADIO_FIELD_METADATA:
-                parse_metadata(msg_data)
-            # field 10 = channel (Channel)
-            elif field_number == FROMRADIO_FIELD_CHANNEL:
-                parse_channel(msg_data)
-
-        except Exception as e:
-            break
-
-
-def parse_mesh_packet(data):
-    """Parse a MeshPacket protobuf."""
-    fields = parse_protobuf_fields(data)
-    with state_lock:
-        packet = {
-            'from': get_field_value(fields, PKT_FIELD_FROM),
-            'to': get_field_value(fields, PKT_FIELD_TO),
-            'channel': get_field_value(fields, PKT_FIELD_CHANNEL, 0),
-            'id': get_field_value(fields, PKT_FIELD_ID),
-            'rx_time': get_field_value(fields, PKT_FIELD_RX_TIME),
-            'hop_limit': get_field_value(fields, PKT_FIELD_HOP_LIMIT),
-            'timestamp': time.time(),
-        }
-
-        # Decoded payload (field 4 = Data sub-message)
-        decoded = get_field_value(fields, PKT_FIELD_DECODED)
-        portnum = None
-        payload_bytes = None
-
-        if isinstance(decoded, bytes):
-            sub_fields = parse_protobuf_fields(decoded)
-            portnum = get_field_value(sub_fields, DATA_FIELD_PORTNUM)
-            payload_bytes = get_field_value(sub_fields, DATA_FIELD_PAYLOAD)
-
-        if portnum == PORTNUM_TEXT_MESSAGE and payload_bytes:
-            text = safe_str(payload_bytes)
-            packet['text'] = text
-            packet['type'] = 'text'
-            state['messages'].append(packet)
-            # Keep only last 200 messages
-            if len(state['messages']) > 200:
-                state['messages'] = state['messages'][-200:]
-
-        elif portnum == PORTNUM_TELEMETRY and payload_bytes:
-            parse_telemetry(payload_bytes)
-
-        elif portnum == PORTNUM_POSITION and payload_bytes:
-            parse_position_msg(payload_bytes)
-
-        elif portnum == PORTNUM_NODEINFO and payload_bytes:
-            parse_node_info(payload_bytes)
-
-
-def parse_my_info(data):
-    """Parse a MyNodeInfo protobuf message (device self-info)."""
-    fields = parse_protobuf_fields(data)
-    with state_lock:
-        node_num = get_field_value(fields, 1)
-        if node_num is not None:
-            # Field 1 in MyNodeInfo is my_node_num (uint32, but might be 32-bit fixed)
-            if isinstance(node_num, float):
-                node_num = int(node_num)
-            state['device_info']['node_num'] = node_num
-            state['device_info']['node_id'] = '!%08x' % node_num if isinstance(node_num, int) else None
-        # Field 4 = channel_settings (count or list)
-        # Field 9 = hw_model (enum)
-        hw_model = get_field_value(fields, 9)
-        if hw_model is not None:
-            state['device_info']['hw_model'] = int(hw_model) if not isinstance(hw_model, int) else hw_model
-        # Field 11 = firmware_version
-        fw = get_field_value(fields, 11)
-        if isinstance(fw, bytes):
-            state['device_info']['firmware'] = safe_str(fw)
-
-
-def parse_channel(data):
-    """Parse a Channel protobuf message from FromRadio."""
-    fields = parse_protobuf_fields(data)
-    index = get_field_value(fields, CHANNEL_FIELD_INDEX)
-    if index is None:
-        return
-    index = int(index)
-
-    channel = {
-        'index': index,
-        'name': '',
-        'role': 'UNKNOWN',
-        'uplink_enabled': False,
-        'downlink_enabled': False,
-    }
-
-    # Field 2 = ChannelSettings sub-message
-    settings_raw = get_field_value(fields, CHANNEL_FIELD_SETTINGS)
-    if settings_raw is not None and isinstance(settings_raw, (bytes, bytearray)):
-        sfields = parse_protobuf_fields(settings_raw)
-        name_raw = get_field_value(sfields, CH_SETTINGS_NAME)
-        if name_raw is not None:
-            channel['name'] = safe_str(name_raw) if isinstance(name_raw, (bytes, bytearray)) else str(name_raw)
-        role_val = get_field_value(sfields, CH_SETTINGS_ROLE)
-        if role_val is not None:
-            role_val = int(role_val)
-            if role_val == 0:
-                channel['role'] = 'DISABLED'
-            elif role_val == 1:
-                channel['role'] = 'PRIMARY'
-            elif role_val == 2:
-                channel['role'] = 'SECONDARY'
-        uplink = get_field_value(sfields, CH_SETTINGS_UPLINK)
-        if uplink is not None:
-            channel['uplink_enabled'] = bool(uplink)
-        downlink = get_field_value(sfields, CH_SETTINGS_DOWNLINK)
-        if downlink is not None:
-            channel['downlink_enabled'] = bool(downlink)
-
-    if not channel['name']:
-        channel['name'] = 'ch' + str(index)
-
-    with state_lock:
-        state['channels'][index] = channel
-
-
-def parse_node_info(data):
-    """Parse a NodeInfo protobuf message."""
-    fields = parse_protobuf_fields(data)
-    node_num = get_field_value(fields, SI_FIELD_NODE_NUM)
-    if node_num is None:
-        return
-
-    long_name = None
-    short_name = None
-    role = None
-
-    # Long name is a sub-message (bytes containing string)
-    ln = get_field_value(fields, SI_FIELD_LONG_NAME)
-    if isinstance(ln, bytes):
-        long_name = safe_str(ln)
-
-    sn = get_field_value(fields, SI_FIELD_SHORT_NAME)
-    if isinstance(sn, bytes):
-        short_name = safe_str(sn)
-
-    r = get_field_value(fields, SI_FIELD_ROLE)
-    if r is not None:
-        role = int(r) if not isinstance(r, int) else r
-
-    with state_lock:
-        node_id = '!%08x' % node_num
-        existing = state['nodes'].get(node_id, {})
-        existing['node_num'] = node_num
-        if long_name:
-            existing['long_name'] = long_name
-        if short_name:
-            existing['short_name'] = short_name
-        if role is not None:
-            existing['role'] = role
-        existing['last_heard'] = time.time()
-        state['nodes'][node_id] = existing
-
-
-def parse_telemetry(data):
-    """Parse a Telemetry protobuf message."""
-    fields = parse_protobuf_fields(data)
-    node_num = get_field_value(fields, 1)  # from node
-
-    if node_num is None:
-        return
-
-    battery = get_field_value(fields, TELEM_FIELD_BATTERY)
-    voltage = get_field_value(fields, TELEM_FIELD_VOLTAGE)
-    channel_util = get_field_value(fields, TELEM_FIELD_CHANNEL_UTIL)
-    air_util = get_field_value(fields, TELEM_FIELD_AIR_UTIL)
-    baro = get_field_value(fields, TELEM_FIELD_BARO)
-    temp = get_field_value(fields, TELEM_FIELD_TEMP)
-    humidity = get_field_value(fields, TELEM_FIELD_HUMIDITY)
-
-    with state_lock:
-        node_id = '!%08x' % node_num
-        telemetry = state['telemetry'].get(node_id, {})
-        if battery is not None:
-            telemetry['battery'] = int(battery)
-        if voltage is not None:
-            telemetry['voltage'] = round(float(voltage), 2)
-        if channel_util is not None:
-            telemetry['channel_util'] = round(float(channel_util), 2)
-        if air_util is not None:
-            telemetry['air_util'] = round(float(air_util), 2)
-        if baro is not None:
-            telemetry['baro'] = round(float(baro), 1)
-        if temp is not None:
-            telemetry['temp'] = round(float(temp), 1)
-        if humidity is not None:
-            telemetry['humidity'] = round(float(humidity), 1)
-        telemetry['timestamp'] = time.time()
-        state['telemetry'][node_id] = telemetry
-
-
-def parse_position_msg(data):
-    """Parse a Position protobuf message."""
-    fields = parse_protobuf_fields(data)
-    node_num = get_field_value(fields, 1)
-
-    lat_raw = get_field_value(fields, POS_FIELD_LAT)
-    lon_raw = get_field_value(fields, POS_FIELD_LON)
-    alt = get_field_value(fields, POS_FIELD_ALT)
-
-    with state_lock:
-        node_id = '!%08x' % node_num if node_num else None
-        if node_id:
-            pos = state['positions'].get(node_id, {})
-            if lat_raw is not None:
-                pos['lat'] = round(decode_zigzag32(int(lat_raw)) * 1e-7, 6)
-            if lon_raw is not None:
-                pos['lon'] = round(decode_zigzag32(int(lon_raw)) * 1e-7, 6)
-            if alt is not None:
-                pos['alt'] = int(alt)
-            pos['timestamp'] = time.time()
-            state['positions'][node_id] = pos
-
-
-def parse_metadata(data):
-    """Parse device metadata."""
-    fields = parse_protobuf_fields(data)
-    with state_lock:
-        fw_version = get_field_value(fields, 1)  # firmware_version
-        if isinstance(fw_version, bytes):
-            state['device_info']['firmware'] = safe_str(fw_version)
-        hw_model = get_field_value(fields, 2)
-        if hw_model is not None:
-            state['device_info']['hw_model'] = int(hw_model) if not isinstance(hw_model, int) else hw_model
-
-
-def send_text_message(text, channel=DEFAULT_CHANNEL, dest_node=None):
-    """Send a text message to the Meshtastic device via HTTP API."""
-    # Build the inner Data message (portnum + payload)
-    data_bytes = bytearray()
-
-    # Portnum (field 3, wire type 2 = length-delimited within Data submessage)
-    # Actually Data.portnum is a variant (enum) field 3, wire type 0
-    data_bytes += encode_varint((DATA_FIELD_PORTNUM << 3) | 0)  # Data field 1 (portnum)
-    data_bytes += encode_varint(PORTNUM_TEXT_MESSAGE)
-
-    # Payload (Data field 2, length-delimited)
-    payload = text.encode('utf-8')
-    data_bytes += encode_varint((DATA_FIELD_PAYLOAD << 3) | 2)
-    data_bytes += encode_varint(len(payload))
-    data_bytes += payload
-
-    # Build MeshPacket
-    packet = bytearray()
-
-    # From field (field 1, varint) - let device fill it
-    # To field (field 2, varint)
-    if dest_node:
-        packet += encode_varint((PKT_FIELD_TO << 3) | 0)
-        packet += encode_varint(dest_node)
-
-    # Channel (field 3, varint)
-    packet += encode_varint((PKT_FIELD_CHANNEL << 3) | 0)
-    packet += encode_varint(channel)
-
-    # Decoded Data payload (field 4, length-delimited)
-    packet += encode_varint((PKT_FIELD_DECODED << 3) | 2)
-    packet += encode_varint(len(data_bytes))
-    packet += data_bytes
-
-    # Build ToRadio message (field 1 = packet)
-    to_radio = bytearray()
-    to_radio += encode_varint((TORADIO_FIELD_PACKET << 3) | 2)  # field 1, length-delimited
-    to_radio += encode_varint(len(packet))
-    to_radio += packet
-
-    # Try standard HTTP first
-    url = f"{DEVICE_URL}/api/v1/toradio"
-    try:
-        resp = requests.put(url, data=bytes(to_radio),
-                           headers={'Content-Type': 'application/x-protobuf'},
-                           timeout=5)
-        if resp.status_code == 200:
-            return True
-    except (requests.exceptions.RequestException, Exception):
+        if hasattr(iface, 'metadata') and iface.metadata:
+            m = iface.metadata
+            device_info['firmware'] = m.firmware_version if hasattr(m, 'firmware_version') else str(getattr(m, 'firmwareVersion', ''))
+            device_info['hw_model'] = device_info.get('hw_model', '')
+    except:
         pass
-    # Fallback: TCP stream protocol (meshtasticd)
-    global _tcp_socket
+
+    with state_lock:
+        state['nodes'] = nodes
+        state['channels'] = channels
+        state['device_info'] = device_info
+
+
+def connect_to_radio():
+    """Connect to the meshtastic device using the official library."""
+    global _iface
+    host, port = _parse_device_url()
     try:
-        with _tcp_lock:
-            sock = _get_tcp_connection()
-            # StreamAPI frame: magic(2) + big-endian-length(2) + payload
-            frame = TCP_MAGIC + struct.pack('>H', len(to_radio)) + bytes(to_radio)
-            try:
-                sock.sendall(frame)
-            except (socket.error, BrokenPipeError):
-                _tcp_socket = None
-                sock = _get_tcp_connection()
-                sock.sendall(frame)
-            return True
+        iface = TCPInterface(
+            hostname=host,
+            portNumber=port,
+            connectNow=True,
+            timeout=30,
+        )
+        # Register receive callback via pubsub
+        pub.subscribe(on_receive, 'meshtastic.receive')
+        # Wait for config to be populated
+        iface.waitForConfig()
+        _iface = iface
+        return True
     except Exception as e:
-        state['error'] = str(e)
-        _tcp_socket = None
+        print(f"[!] Connection error: {e}", file=sys.stderr)
+        _iface = None
         return False
 
 
 def poll_loop():
     """Background polling loop."""
+    global _iface
     while True:
         try:
-            result = poll_from_radio()
-            with state_lock:
-                state['connected'] = result
-                state['last_poll'] = time.time()
-                if result:
-                    state['error'] = None
+            if _iface is None:
+                connected = connect_to_radio()
+                with state_lock:
+                    state['connected'] = connected
+                    state['last_poll'] = time.time()
+                    if connected:
+                        state['error'] = None
+                    else:
+                        state['error'] = 'Could not connect to device'
+            else:
+                # Sync state from interface
+                try:
+                    sync_state_from_iface(_iface)
+                    # Send heartbeat to keep connection alive
+                    _iface.sendHeartbeat()
+                    with state_lock:
+                        state['connected'] = True
+                        state['last_poll'] = time.time()
+                        state['error'] = None
+                except Exception as e:
+                    print(f"[!] Poll error: {e}", file=sys.stderr)
+                    with state_lock:
+                        state['connected'] = False
+                        state['error'] = str(e)
+                    try:
+                        _iface.close()
+                    except:
+                        pass
+                    _iface = None
         except Exception as e:
+            print(f"[!] Loop error: {e}", file=sys.stderr)
             with state_lock:
                 state['error'] = str(e)
                 state['connected'] = False
+            _iface = None
+
         time.sleep(POLL_INTERVAL)
 
 
 # --- HTTP SERVER ---
 class MeshtasticProxyHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
-        pass  # Silence logs
+        pass
 
     def do_OPTIONS(self):
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -828,34 +451,36 @@ class MeshtasticProxyHandler(http.server.SimpleHTTPRequestHandler):
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
+    def send_json(self, data, status=200):
+        body = json.dumps(data).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(body)
+
     def handle_api(self, parsed):
         if parsed.path == '/api/status':
-            self.send_json({
-                'connected': state['connected'],
-                'device_url': DEVICE_URL,
-                'device_info': state['device_info'],
-                'last_poll': state['last_poll'],
-                'error': state['error'],
-                'node_count': len(state['nodes']),
-                'message_count': len(state['messages']),
-            })
+            with state_lock:
+                self.send_json({
+                    'connected': state['connected'],
+                    'device_url': DEVICE_URL,
+                    'device_info': state['device_info'],
+                    'last_poll': state['last_poll'],
+                    'error': state['error'],
+                    'node_count': len(state['nodes']),
+                    'message_count': len(state['messages']),
+                    'channel_count': len(state['channels']),
+                })
         elif parsed.path == '/api/nodes':
             with state_lock:
-                nodes = []
-                for node_id, info in state['nodes'].items():
-                    node = dict(info)
-                    node['id'] = node_id
-                    # Attach telemetry if available
-                    if node_id in state['telemetry']:
-                        node['telemetry'] = state['telemetry'][node_id]
-                    if node_id in state['positions']:
-                        node['position'] = state['positions'][node_id]
-                    nodes.append(node)
-                # Sort: known names first, then by last heard
-                nodes.sort(key=lambda n: (
-                    n.get('long_name', '') == '',
-                    -(n.get('last_heard', 0))
-                ))
+                nodes = list(state['nodes'].values())
+            # Sort: known names first, then by last heard
+            nodes.sort(key=lambda n: (
+                n.get('long_name', '') == '',
+                -(n.get('last_heard', 0) or 0)
+            ))
             self.send_json({'nodes': nodes})
         elif parsed.path == '/api/messages':
             with state_lock:
@@ -864,18 +489,24 @@ class MeshtasticProxyHandler(http.server.SimpleHTTPRequestHandler):
                 'messages': messages,
                 'device_url': DEVICE_URL,
             })
-        elif parsed.path == '/api/telemetry':
-            with state_lock:
-                telemetry = dict(state['telemetry'])
-            self.send_json({'telemetry': telemetry})
-        elif parsed.path == '/api/positions':
-            with state_lock:
-                positions = dict(state['positions'])
-            self.send_json({'positions': positions})
         elif parsed.path == '/api/channels':
             with state_lock:
                 channels = sorted(state['channels'].values(), key=lambda c: c.get('index', 0))
             self.send_json({'channels': channels})
+        elif parsed.path == '/api/telemetry':
+            with state_lock:
+                telemetry = {}
+                for nid, node in state['nodes'].items():
+                    if 'telemetry' in node:
+                        telemetry[nid] = node['telemetry']
+            self.send_json({'telemetry': telemetry})
+        elif parsed.path == '/api/positions':
+            with state_lock:
+                positions = {}
+                for nid, node in state['nodes'].items():
+                    if 'position' in node:
+                        positions[nid] = node['position']
+            self.send_json({'positions': positions})
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -896,31 +527,30 @@ class MeshtasticProxyHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({'ok': False, 'error': 'Message too long (max 200 chars)'}, 400)
                 return
 
-            dest_int = None
-            if dest and dest.startswith('!'):
-                try:
-                    dest_int = int(dest[1:], 16)
-                except ValueError:
-                    pass
+            if _iface is None:
+                self.send_json({'ok': False, 'error': 'Not connected to device'}, 503)
+                return
 
-            success = send_text_message(text, channel, dest_int)
-            if success:
+            # Use the official library to send
+            try:
+                dest_int = None
+                if dest and dest.startswith('!'):
+                    try:
+                        dest_int = int(dest[1:], 16)
+                    except ValueError:
+                        pass
+
+                if dest_int:
+                    _iface.sendText(text, destinationId=dest_int, channelIndex=channel)
+                else:
+                    _iface.sendText(text, channelIndex=channel)
+
                 self.send_json({'ok': True})
-            else:
-                self.send_json({'ok': False, 'error': state.get('error', 'Send failed')}, 500)
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)}, 500)
+
         except json.JSONDecodeError:
             self.send_json({'ok': False, 'error': 'Invalid JSON'}, 400)
-        except Exception as e:
-            self.send_json({'ok': False, 'error': str(e)}, 500)
-
-    def send_json(self, data, status=200):
-        body = json.dumps(data).encode('utf-8')
-        self.send_response(status)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(body)))
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
-        self.wfile.write(body)
 
 
 def main():
@@ -931,7 +561,7 @@ def main():
     print(f"[*] Device URL: {DEVICE_URL}")
     print(f"[*] Poll interval: {POLL_INTERVAL}s")
 
-    server = http.server.HTTPServer(('0.0.0.0', PORT), MeshtasticProxyHandler)
+    server = http.server.ThreadingHTTPServer(('0.0.0.0', PORT), MeshtasticProxyHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
