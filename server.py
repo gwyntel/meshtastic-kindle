@@ -148,11 +148,21 @@ def on_receive(packet, interface=None):
         to_id = packet.get('to')
         channel = packet.get('channel', 0)
         rx_time = packet.get('rxTime', packet.get('rx_time', 0))
+        via_mqtt = packet.get('viaMqtt', False)
+        hop_limit = packet.get('hopLimit')
+        hop_start = packet.get('hopStart')
+        rx_snr = packet.get('rxSnr')
+        relay_node = packet.get('relayNode')
 
         if not from_id:
             return
 
         from_hex = '!%08x' % from_id if isinstance(from_id, int) else str(from_id)
+
+        # Calculate hops taken if both hop_start and hop_limit present
+        hops_taken = None
+        if hop_start is not None and hop_limit is not None:
+            hops_taken = hop_start - hop_limit
 
         if portnum == 'TEXT_MESSAGE_APP':
             text = ''
@@ -161,6 +171,17 @@ def on_receive(packet, interface=None):
             elif isinstance(payload, str):
                 text = payload
 
+            # Determine if this is our own sent message echoed back
+            device_node_num = None
+            try:
+                if _iface and hasattr(_iface, 'getMyNodeInfo'):
+                    my_info = _iface.getMyNodeInfo()
+                    device_node_num = my_info.get('num')
+            except:
+                pass
+
+            is_own = (from_id == device_node_num) if device_node_num and isinstance(from_id, int) else False
+
             msg = {
                 'from': from_hex,
                 'from_num': from_id,
@@ -168,11 +189,25 @@ def on_receive(packet, interface=None):
                 'channel': channel,
                 'text': text,
                 'timestamp': rx_time or int(time.time()),
+                'via_mqtt': via_mqtt,
+                'hops_taken': hops_taken,
+                'snr': rx_snr,
+                'is_own': is_own,
+                'relay_node': relay_node,
             }
             with state_lock:
-                state['messages'].append(msg)
-                if len(state['messages']) > 100:
-                    state['messages'] = state['messages'][-100:]
+                # Skip if we already have this message (dedup by from+text+timestamp)
+                is_dup = False
+                for existing in state['messages'][-10:]:
+                    if (existing.get('from') == msg['from'] and
+                        existing.get('text') == msg['text'] and
+                        abs((existing.get('timestamp') or 0) - (msg.get('timestamp') or 0)) < 5):
+                        is_dup = True
+                        break
+                if not is_dup:
+                    state['messages'].append(msg)
+                    if len(state['messages']) > 100:
+                        state['messages'] = state['messages'][-100:]
 
         elif portnum == 'NODEINFO_APP':
             # Node info updates come through automatically via iface.nodes

@@ -67,6 +67,7 @@ var favOnlyBtn = document.getElementById('favOnlyBtn');
 var msgSearch = document.getElementById('msgSearch');
 var dmTargetEl = document.getElementById('dmTarget');
 var inputArea = document.getElementById('inputArea');
+var ctxBanner = document.getElementById('ctxBanner');
 
 // Select overlay
 var selectOverlay = document.getElementById('selectOverlay');
@@ -323,16 +324,25 @@ function renderMessages(data) {
     var time = formatTime(m.timestamp);
     var isDM = m.to && m.to !== '!ffffffff';
     var dmTag = isDM ? ' [DM]' : '';
+    var ownTag = m.is_own ? ' [sent]' : '';
+    var transport = m.via_mqtt ? 'mqtt' : 'lora';
 
-    // Get hops from sender's node info
-    var senderNode = state.nodeCache[m.from];
+    // Hops: use packet hops_taken if available, else sender's hops_away
     var hops = '';
-    if (senderNode && senderNode.hops_away !== undefined && senderNode.hops_away !== null) {
-      hops = ' - ' + senderNode.hops_away + ' hops';
+    if (m.hops_taken !== undefined && m.hops_taken !== null) {
+      hops = ' - ' + m.hops_taken + ' hops';
+    } else {
+      var senderNode = state.nodeCache[m.from];
+      if (senderNode && senderNode.hops_away !== undefined && senderNode.hops_away !== null) {
+        hops = ' - ~' + senderNode.hops_away + ' hops';
+      }
     }
 
-    html += '<div class="message" data-msgidx="' + k + '">' +
-      '<div class="message-meta">' + escapeHtml(fromName) + dmTag + ' - ch' + (m.channel || 0) + ' - ' + time + hops + '</div>' +
+    var msgClass = 'message';
+    if (m.is_own) msgClass += ' message-own';
+
+    html += '<div class="' + msgClass + '" data-msgidx="' + k + '">' +
+      '<div class="message-meta">' + escapeHtml(fromName) + dmTag + ownTag + ' - ch' + (m.channel || 0) + ' - ' + time + hops + ' - ' + transport + '</div>' +
       '<div class="message-text">' + renderMarkdown(m.text) + '</div>' +
       '</div>';
   }
@@ -358,13 +368,19 @@ function showMsgDetails(msg) {
   html += infoRow('to id', msg.to || 'broadcast');
   html += infoRow('channel', 'ch' + (msg.channel || 0));
   html += infoRow('time', formatTime(msg.timestamp));
+  html += infoRow('transport', msg.via_mqtt ? 'MQTT' : 'LoRa');
+  if (msg.is_own) html += infoRow('direction', 'sent by you');
+  if (msg.hops_taken !== undefined && msg.hops_taken !== null)
+    html += infoRow('hops taken', msg.hops_taken);
+  if (msg.snr !== undefined && msg.snr !== null)
+    html += infoRow('snr', msg.snr + ' dB');
+  if (msg.relay_node)
+    html += infoRow('relay', msg.relay_node);
   if (senderNode) {
     if (senderNode.hops_away !== undefined && senderNode.hops_away !== null)
-      html += infoRow('hops away', senderNode.hops_away);
-    if (senderNode.snr !== undefined && senderNode.snr !== null)
-      html += infoRow('snr', senderNode.snr + ' dB');
+      html += infoRow('sender hops away', senderNode.hops_away);
     if (senderNode.role)
-      html += infoRow('role', senderNode.role);
+      html += infoRow('sender role', senderNode.role);
   }
   html += '</div>';
   html += '<div style="margin-top:12px;font-size:14px;white-space:pre-wrap;word-break:break-word;">' + renderMarkdown(msg.text) + '</div>';
@@ -664,6 +680,7 @@ function renderChannels(data) {
   if (!data || !data.channels) return;
   var channels = data.channels;
   state.channels = channels;
+  updateCtxBanner();
 
   // Hide disabled channels entirely
   var active = [];
@@ -744,6 +761,7 @@ function setDMTarget(nodeId) {
   inputField.placeholder = 'DM to ' + name + '...';
   dmTargetEl.textContent = 'DM: ' + name + ' (tap to cancel)';
   dmTargetEl.className = 'dm-target active';
+  updateCtxBanner();
 }
 
 function clearDMTarget() {
@@ -751,6 +769,24 @@ function clearDMTarget() {
   inputField.placeholder = 'broadcast...';
   dmTargetEl.textContent = '';
   dmTargetEl.className = 'dm-target';
+  updateCtxBanner();
+}
+
+function updateCtxBanner() {
+  var chName = 'ch' + config.channel;
+  for (var i = 0; i < state.channels.length; i++) {
+    if (state.channels[i].index === config.channel) {
+      chName = state.channels[i].name || chName;
+      break;
+    }
+  }
+  var html = '<span class="ctx-channel">channel: ' + escapeHtml(chName) + '</span>';
+  if (state.dmTarget) {
+    var dmName = getNodeName(state.dmTarget);
+    html += '<span class="ctx-dm"> | DM to: ' + escapeHtml(dmName) + '</span>';
+  }
+  ctxBanner.innerHTML = html;
+  ctxBanner.style.display = '';
 }
 
 // --- POLLING ---
@@ -805,8 +841,10 @@ function switchTab(tabName) {
   if (panel) panel.classList.add('active');
 
   inputArea.style.display = (tabName === 'messages') ? '' : 'none';
-
-  if (tabName === 'messages') fetchMessages().then(renderMessages);
+  if (tabName === 'messages') {
+    updateCtxBanner();
+    fetchMessages().then(renderMessages);
+  }
   else if (tabName === 'channels') fetchChannels().then(renderChannels);
   else if (tabName === 'nodes') fetchNodes().then(renderNodes);
   else if (tabName === 'settings') pollAll();
