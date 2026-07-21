@@ -21,6 +21,7 @@ var config = {
 var messageList = document.getElementById('messageList');
 var nodeList = document.getElementById('nodeList');
 var positionList = document.getElementById('positionList');
+var channelList = document.getElementById('channelList');
 var inputField = document.getElementById('inputField');
 var sendBtn = document.getElementById('sendBtn');
 var refreshBtn = document.getElementById('refreshBtn');
@@ -100,6 +101,10 @@ function fetchNodes() {
 
 function fetchPositions() {
   return fetchJSON(config.serverUrl + '/api/positions');
+}
+
+function fetchChannels() {
+  return fetchJSON(config.serverUrl + '/api/channels');
 }
 
 function sendMessage(text) {
@@ -262,6 +267,38 @@ function renderPositions(data) {
   positionList.innerHTML = html;
 }
 
+function renderChannels(data) {
+  if (!data || !data.channels) return;
+
+  var channels = data.channels;
+  if (channels.length === 0) {
+    if (channelList.querySelector('.empty-state')) return;
+    channelList.innerHTML = '<div class="empty-state"><div class="empty-title">no channels</div><div class="empty-sub">waiting for channel data...</div></div>';
+    return;
+  }
+
+  var html = '';
+  for (var i = 0; i < channels.length; i++) {
+    var ch = channels[i];
+    var roleTag = '';
+    if (ch.role === 'PRIMARY') roleTag = ' [PRIMARY]';
+    else if (ch.role === 'SECONDARY') roleTag = ' [SECONDARY]';
+    else if (ch.role === 'DISABLED') roleTag = ' [DISABLED]';
+
+    html += '<div class="channel-card">' +
+      '<div class="channel-name">' + escapeHtml(ch.name || ('ch' + ch.index)) + roleTag + '</div>' +
+      '<div class="channel-meta">index ' + ch.index;
+
+    if (ch.uplink_enabled) html += ' - uplink:on';
+    if (ch.downlink_enabled) html += ' - downlink:on';
+    html += '</div>';
+
+    html += '</div>';
+  }
+
+  channelList.innerHTML = html;
+}
+
 // --- POLLING ---
 function pollAll() {
   // Always fetch status
@@ -287,6 +324,8 @@ function pollAll() {
   // Fetch tab-specific data
   if (state.activeTab === 'messages') {
     fetchMessages().then(renderMessages);
+  } else if (state.activeTab === 'channels') {
+    fetchChannels().then(renderChannels);
   } else if (state.activeTab === 'nodes') {
     fetchNodes().then(renderNodes);
   } else if (state.activeTab === 'map') {
@@ -329,6 +368,8 @@ function switchTab(tabName) {
   // Immediate data fetch for new tab
   if (tabName === 'messages') {
     fetchMessages().then(renderMessages);
+  } else if (tabName === 'channels') {
+    fetchChannels().then(renderChannels);
   } else if (tabName === 'nodes') {
     fetchNodes().then(renderNodes);
   } else if (tabName === 'map') {

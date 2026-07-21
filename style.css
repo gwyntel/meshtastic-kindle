@@ -63,6 +63,11 @@ html, body {
   border-color: #333;
 }
 
+[data-theme="dark"] .channel-card {
+  background: #1a1a1a;
+  border-color: #333;
+}
+
 [data-theme="dark"] .input-field {
   background: #1a1a1a;
   color: #e8e8e8;
@@ -293,6 +298,29 @@ html, body {
 .tele-meter {
   font-size: 11px;
   font-family: "Courier New", monospace;
+}
+
+.channel-list {
+  padding: 0;
+}
+
+.channel-card {
+  padding: 8px 10px;
+  border: 1px solid #000;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.channel-name {
+  font-size: 14px;
+  font-weight: bold;
+  margin-bottom: 4px;
+}
+
+.channel-meta {
+  font-family: "Courier New", monospace;
+  font-size: 11px;
+  opacity: 0.7;
 }
 
 .tele-label {

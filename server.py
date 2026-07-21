@@ -96,6 +96,17 @@ POS_FIELD_LAT = 1  # sint32 (1e-7)
 POS_FIELD_LON = 2  # sint32 (1e-7)
 POS_FIELD_ALT = 3  # int32
 
+# Channel field numbers (from channel.proto)
+CHANNEL_FIELD_INDEX = 1   # uint32 (channel index 0-7)
+CHANNEL_FIELD_SETTINGS = 2  # ChannelSettings sub-message
+
+# ChannelSettings field numbers (inside Channel.settings)
+CH_SETTINGS_NAME = 1       # bytes (channel name)
+CH_SETTINGS_ROLE = 3      # enum (0=DISABLED,1=PRIMARY,2=SECONDARY)
+CH_SETTINGS_PSK = 4        # bytes (pre-shared key, usually empty for virtual)
+CH_SETTINGS_UPLINK = 5     # bool
+CH_SETTINGS_DOWNLINK = 6   # bool
+
 
 def encode_varint(value):
     """Encode an unsigned integer as a protobuf varint."""
@@ -213,6 +224,7 @@ state = {
     'messages': [],      # list of {id, from, to, channel, text, timestamp}
     'telemetry': {},     # node_num -> {battery, voltage, temp, ...}
     'positions': {},     # node_num -> {lat, lon, alt}
+    'channels': {},      # channel_index -> {index, name, role, uplink, downlink}
     'device_info': {},   # device metadata
     'last_poll': 0,
     'connected': False,
@@ -450,6 +462,9 @@ def parse_from_radio_data(data):
             # field 13 = metadata (DeviceMetadata)
             elif field_number == FROMRADIO_FIELD_METADATA:
                 parse_metadata(msg_data)
+            # field 10 = channel (Channel)
+            elif field_number == FROMRADIO_FIELD_CHANNEL:
+                parse_channel(msg_data)
 
         except Exception as e:
             break
@@ -518,6 +533,52 @@ def parse_my_info(data):
         fw = get_field_value(fields, 11)
         if isinstance(fw, bytes):
             state['device_info']['firmware'] = safe_str(fw)
+
+
+def parse_channel(data):
+    """Parse a Channel protobuf message from FromRadio."""
+    fields = parse_protobuf_fields(data)
+    index = get_field_value(fields, CHANNEL_FIELD_INDEX)
+    if index is None:
+        return
+    index = int(index)
+
+    channel = {
+        'index': index,
+        'name': '',
+        'role': 'UNKNOWN',
+        'uplink_enabled': False,
+        'downlink_enabled': False,
+    }
+
+    # Field 2 = ChannelSettings sub-message
+    settings_raw = get_field_value(fields, CHANNEL_FIELD_SETTINGS)
+    if settings_raw is not None and isinstance(settings_raw, (bytes, bytearray)):
+        sfields = parse_protobuf_fields(settings_raw)
+        name_raw = get_field_value(sfields, CH_SETTINGS_NAME)
+        if name_raw is not None:
+            channel['name'] = safe_str(name_raw) if isinstance(name_raw, (bytes, bytearray)) else str(name_raw)
+        role_val = get_field_value(sfields, CH_SETTINGS_ROLE)
+        if role_val is not None:
+            role_val = int(role_val)
+            if role_val == 0:
+                channel['role'] = 'DISABLED'
+            elif role_val == 1:
+                channel['role'] = 'PRIMARY'
+            elif role_val == 2:
+                channel['role'] = 'SECONDARY'
+        uplink = get_field_value(sfields, CH_SETTINGS_UPLINK)
+        if uplink is not None:
+            channel['uplink_enabled'] = bool(uplink)
+        downlink = get_field_value(sfields, CH_SETTINGS_DOWNLINK)
+        if downlink is not None:
+            channel['downlink_enabled'] = bool(downlink)
+
+    if not channel['name']:
+        channel['name'] = 'ch' + str(index)
+
+    with state_lock:
+        state['channels'][index] = channel
 
 
 def parse_node_info(data):
@@ -811,6 +872,10 @@ class MeshtasticProxyHandler(http.server.SimpleHTTPRequestHandler):
             with state_lock:
                 positions = dict(state['positions'])
             self.send_json({'positions': positions})
+        elif parsed.path == '/api/channels':
+            with state_lock:
+                channels = sorted(state['channels'].values(), key=lambda c: c.get('index', 0))
+            self.send_json({'channels': channels})
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
