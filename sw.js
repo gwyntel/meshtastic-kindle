@@ -1,6 +1,6 @@
 // mesh-kindle service worker — cache-first for static assets
-var CACHE = 'mesh-kindle-v1';
-var ASSETS = ['/', '/index.html', '/style.css', '/app.js', '/manifest.json'];
+var CACHE = 'mesh-kindle-v2';
+var ASSETS = ['/', '/index.html', '/style.css', '/app.js', '/manifest.json', '/NotoEmoji.ttf'];
 
 self.addEventListener('install', function(e) {
   e.waitUntil(

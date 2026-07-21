@@ -31,13 +31,8 @@
         </div>
       </div>
 
-      <!-- Channels tab -->
+      <!-- Channels tab (no filter bar, disabled channels hidden) -->
       <div class="tab-panel" id="panel-channels">
-        <div class="filter-bar" id="chFilterBar">
-          <button class="filter-btn active" data-chfilter="all">all</button>
-          <button class="filter-btn" data-chfilter="active">active</button>
-          <button class="filter-btn" data-chfilter="disabled">disabled</button>
-        </div>
         <div class="channel-list" id="channelList">
           <div class="empty-state">
             <div class="empty-title">no channels</div>
@@ -50,23 +45,8 @@
       <div class="tab-panel" id="panel-nodes">
         <div class="filter-bar" id="nodeFilterBar">
           <input type="text" class="filter-input" id="nodeSearch" placeholder="search nodes...">
-          <select class="filter-select" id="nodeRoleFilter">
-            <option value="all">all roles</option>
-            <option value="CLIENT">client</option>
-            <option value="CLIENT_MUTE">mute</option>
-            <option value="ROUTER">router</option>
-            <option value="ROUTER_CLIENT">rtr-cli</option>
-            <option value="REPEATER">repeater</option>
-            <option value="TRACKER">tracker</option>
-            <option value="SENSOR">sensor</option>
-          </select>
-          <select class="filter-select" id="nodeSort">
-            <option value="name">name</option>
-            <option value="last_heard">recent</option>
-            <option value="snr">snr</option>
-            <option value="hops">hops</option>
-            <option value="distance">distance</option>
-          </select>
+          <button class="filter-btn" id="sortBtn">sort: name</button>
+          <button class="filter-btn" id="roleBtn">role: all</button>
           <button class="filter-btn" id="favOnlyBtn">fav</button>
         </div>
         <div class="node-list" id="nodeList">
@@ -151,6 +131,26 @@
     </div>
 
     <div class="status-bar" id="statusBar">connecting...</div>
+  </div>
+
+  <!-- Full-screen select overlay -->
+  <div class="select-overlay" id="selectOverlay">
+    <div class="select-panel">
+      <div class="select-title" id="selectTitle">select</div>
+      <div class="select-options" id="selectOptions"></div>
+      <button class="btn select-cancel" id="selectCancel">cancel</button>
+    </div>
+  </div>
+
+  <!-- Details modal -->
+  <div class="details-overlay" id="detailsOverlay">
+    <div class="details-panel">
+      <div class="details-header">
+        <div class="details-title" id="detailsTitle">details</div>
+        <button class="btn btn-icon" id="detailsClose">x</button>
+      </div>
+      <div class="details-content" id="detailsContent"></div>
+    </div>
   </div>
 
   <script src="app.js"></script>

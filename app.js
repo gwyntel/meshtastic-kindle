@@ -9,11 +9,13 @@ var state = {
   nodes: [],
   channels: [],
   messages: [],
-  nodeCache: {},  // id -> node, for name resolution in messages
+  nodeCache: {},
   homeLat: null,
   homeLon: null,
-  dmTarget: null,  // null = broadcast, '!hexid' = DM target
+  dmTarget: null,
   favOnly: false,
+  sortBy: 'name',
+  roleFilter: 'all',
 };
 
 var config = {
@@ -21,6 +23,25 @@ var config = {
   channel: 0,
   pollInterval: 2000,
 };
+
+var SORT_OPTIONS = [
+  { value: 'name', label: 'name' },
+  { value: 'last_heard', label: 'recent' },
+  { value: 'snr', label: 'snr' },
+  { value: 'hops', label: 'hops' },
+  { value: 'distance', label: 'distance' },
+];
+
+var ROLE_OPTIONS = [
+  { value: 'all', label: 'all roles' },
+  { value: 'CLIENT', label: 'client' },
+  { value: 'CLIENT_MUTE', label: 'mute' },
+  { value: 'ROUTER', label: 'router' },
+  { value: 'ROUTER_CLIENT', label: 'rtr-cli' },
+  { value: 'REPEATER', label: 'repeater' },
+  { value: 'TRACKER', label: 'tracker' },
+  { value: 'SENSOR', label: 'sensor' },
+];
 
 // --- DOM ---
 var messageList = document.getElementById('messageList');
@@ -40,12 +61,24 @@ var deviceInfoGrid = document.getElementById('deviceInfoGrid');
 var netStatsGrid = document.getElementById('netStatsGrid');
 var channelUrlBox = document.getElementById('channelUrlBox');
 var nodeSearch = document.getElementById('nodeSearch');
-var nodeRoleFilter = document.getElementById('nodeRoleFilter');
-var nodeSort = document.getElementById('nodeSort');
+var sortBtn = document.getElementById('sortBtn');
+var roleBtn = document.getElementById('roleBtn');
 var favOnlyBtn = document.getElementById('favOnlyBtn');
 var msgSearch = document.getElementById('msgSearch');
 var dmTargetEl = document.getElementById('dmTarget');
 var inputArea = document.getElementById('inputArea');
+
+// Select overlay
+var selectOverlay = document.getElementById('selectOverlay');
+var selectTitle = document.getElementById('selectTitle');
+var selectOptions = document.getElementById('selectOptions');
+var selectCancel = document.getElementById('selectCancel');
+
+// Details modal
+var detailsOverlay = document.getElementById('detailsOverlay');
+var detailsTitle = document.getElementById('detailsTitle');
+var detailsContent = document.getElementById('detailsContent');
+var detailsClose = document.getElementById('detailsClose');
 
 // --- SETTINGS ---
 function loadSettings() {
@@ -88,9 +121,7 @@ function fetchJSON(url) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
     })
-    .catch(function(e) {
-      return null;
-    });
+    .catch(function() { return null; });
 }
 
 function fetchStatus() { return fetchJSON(config.serverUrl + '/api/status'); }
@@ -133,6 +164,27 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// Simple markdown renderer — **bold**, *italic*, `code`, ~~strike~~, [text](url)
+function renderMarkdown(text) {
+  if (!text) return '';
+  // First escape HTML
+  var html = escapeHtml(text);
+  // Apply markdown patterns (order matters)
+  // Code blocks first (backticks)
+  html = html.replace(/`([^`]+)`/g, '<span class="md-code">$1</span>');
+  // Bold
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<span class="md-bold">$1</span>');
+  // Italic
+  html = html.replace(/\*([^*]+)\*/g, '<span class="md-italic">$1</span>');
+  // Strikethrough
+  html = html.replace(/~~([^~]+)~~/g, '<span class="md-strike">$1</span>');
+  // Links [text](url)
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="md-link">$1</a>');
+  // Line breaks
+  html = html.replace(/\n/g, '<br>');
+  return html;
+}
+
 function formatTime(timestamp) {
   if (!timestamp) return '--:--';
   var d = new Date(timestamp * 1000);
@@ -143,20 +195,11 @@ function formatTime(timestamp) {
   return h + ':' + m;
 }
 
-function formatUptime(seconds) {
-  if (!seconds || seconds <= 0) return '--';
-  var days = Math.floor(seconds / 86400);
-  var hours = Math.floor((seconds % 86400) / 3600);
-  if (days > 0) return days + 'd ' + hours + 'h';
-  var mins = Math.floor((seconds % 3600) / 60);
-  if (hours > 0) return hours + 'h ' + mins + 'm';
-  return mins + 'm';
-}
-
 function timeAgo(timestamp) {
   if (!timestamp) return 'never';
   var now = Math.floor(Date.now() / 1000);
   var diff = now - timestamp;
+  if (diff < 0) return 'now';
   if (diff < 60) return diff + 's';
   if (diff < 3600) return Math.floor(diff / 60) + 'm';
   if (diff < 86400) return Math.floor(diff / 3600) + 'h';
@@ -187,6 +230,60 @@ function bearing(lat1, lon1, lat2, lon2) {
   return dirs[Math.round(brng / 45) % 8];
 }
 
+function getNodeName(nodeId) {
+  if (!nodeId) return 'unknown';
+  var node = state.nodeCache[nodeId];
+  if (node && node.long_name) return node.long_name;
+  if (node && node.short_name) return node.short_name;
+  return nodeId;
+}
+
+function getNodeDistance(node) {
+  if (!node.position || !node.position.lat || state.homeLat === null) return null;
+  return calcDistance(state.homeLat, state.homeLon, node.position.lat, node.position.lon);
+}
+
+// --- FULL-SCREEN SELECT ---
+function showSelect(title, options, currentValue, callback) {
+  selectTitle.textContent = title;
+  selectOptions.innerHTML = '';
+  for (var i = 0; i < options.length; i++) {
+    (function(opt) {
+      var btn = document.createElement('button');
+      btn.className = 'select-option';
+      if (opt.value === currentValue) btn.classList.add('selected');
+      btn.textContent = opt.label;
+      btn.addEventListener('click', function() {
+        selectOverlay.classList.remove('active');
+        callback(opt.value);
+      });
+      selectOptions.appendChild(btn);
+    })(options[i]);
+  }
+  selectOverlay.classList.add('active');
+}
+
+selectCancel.addEventListener('click', function() {
+  selectOverlay.classList.remove('active');
+});
+
+// --- DETAILS MODAL ---
+function showDetails(title, html) {
+  detailsTitle.textContent = title;
+  detailsContent.innerHTML = html;
+  detailsOverlay.classList.add('active');
+}
+
+detailsClose.addEventListener('click', function() {
+  detailsOverlay.classList.remove('active');
+});
+
+detailsOverlay.addEventListener('click', function(e) {
+  if (e.target === detailsOverlay) {
+    detailsOverlay.classList.remove('active');
+  }
+});
+
 // --- RENDER: STATUS ---
 function setStatus(text, type) {
   statusBar.textContent = text;
@@ -198,13 +295,6 @@ function renderMessages(data) {
   if (!data || !data.messages) return;
   var messages = data.messages;
   state.messages = messages;
-
-  // Build node cache for name resolution
-  var nodeMap = {};
-  for (var i = 0; i < state.nodes.length; i++) {
-    nodeMap[state.nodes[i].id] = state.nodes[i];
-  }
-  state.nodeCache = nodeMap;
 
   var searchTerm = (msgSearch.value || '').toLowerCase();
   var filtered = messages;
@@ -234,22 +324,51 @@ function renderMessages(data) {
     var isDM = m.to && m.to !== '!ffffffff';
     var dmTag = isDM ? ' [DM]' : '';
 
-    html += '<div class="message">' +
-      '<div class="message-meta">' + escapeHtml(fromName) + dmTag + ' - ch' + (m.channel || 0) + ' - ' + time + '</div>' +
-      '<div class="message-text">' + escapeHtml(m.text) + '</div>' +
+    // Get hops from sender's node info
+    var senderNode = state.nodeCache[m.from];
+    var hops = '';
+    if (senderNode && senderNode.hops_away !== undefined && senderNode.hops_away !== null) {
+      hops = ' - ' + senderNode.hops_away + ' hops';
+    }
+
+    html += '<div class="message" data-msgidx="' + k + '">' +
+      '<div class="message-meta">' + escapeHtml(fromName) + dmTag + ' - ch' + (m.channel || 0) + ' - ' + time + hops + '</div>' +
+      '<div class="message-text">' + renderMarkdown(m.text) + '</div>' +
       '</div>';
   }
 
   messageList.innerHTML = html;
   messageList.scrollTop = messageList.scrollHeight;
+
+  // Wire long-press on messages
+  wireLongPress(messageList.querySelectorAll('.message'), function(idx) {
+    var realMsg = filtered[parseInt(idx, 10)];
+    if (realMsg) showMsgDetails(realMsg);
+  });
 }
 
-function getNodeName(nodeId) {
-  if (!nodeId) return 'unknown';
-  var node = state.nodeCache[nodeId];
-  if (node && node.long_name) return node.long_name;
-  if (node && node.short_name) return node.short_name;
-  return nodeId;
+function showMsgDetails(msg) {
+  var fromName = getNodeName(msg.from);
+  var toName = msg.to ? getNodeName(msg.to) : 'broadcast';
+  var senderNode = state.nodeCache[msg.from];
+  var html = '<div class="info-grid">';
+  html += infoRow('from', fromName);
+  html += infoRow('from id', msg.from || '--');
+  html += infoRow('to', toName);
+  html += infoRow('to id', msg.to || 'broadcast');
+  html += infoRow('channel', 'ch' + (msg.channel || 0));
+  html += infoRow('time', formatTime(msg.timestamp));
+  if (senderNode) {
+    if (senderNode.hops_away !== undefined && senderNode.hops_away !== null)
+      html += infoRow('hops away', senderNode.hops_away);
+    if (senderNode.snr !== undefined && senderNode.snr !== null)
+      html += infoRow('snr', senderNode.snr + ' dB');
+    if (senderNode.role)
+      html += infoRow('role', senderNode.role);
+  }
+  html += '</div>';
+  html += '<div style="margin-top:12px;font-size:14px;white-space:pre-wrap;word-break:break-word;">' + renderMarkdown(msg.text) + '</div>';
+  showDetails('message details', html);
 }
 
 // --- RENDER: NODES ---
@@ -258,11 +377,18 @@ function renderNodes(data) {
   var nodes = data.nodes;
   state.nodes = nodes;
 
-  // Find home node position for distance calc
+  // Update node cache
+  var nodeMap = {};
   for (var h = 0; h < nodes.length; h++) {
-    if (nodes[h].is_favorite && nodes[h].position) {
-      state.homeLat = nodes[h].position.lat;
-      state.homeLon = nodes[h].position.lon;
+    nodeMap[nodes[h].id] = nodes[h];
+  }
+  state.nodeCache = nodeMap;
+
+  // Find home node position
+  for (var i = 0; i < nodes.length; i++) {
+    if (nodes[i].is_favorite && nodes[i].position) {
+      state.homeLat = nodes[i].position.lat;
+      state.homeLon = nodes[i].position.lon;
       break;
     }
   }
@@ -272,38 +398,39 @@ function renderNodes(data) {
   var searchTerm = (nodeSearch.value || '').toLowerCase();
   if (searchTerm) {
     filtered = [];
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i];
+    for (var j = 0; j < nodes.length; j++) {
+      var n = nodes[j];
       var name = (n.long_name || n.short_name || n.id || '').toLowerCase();
       if (name.indexOf(searchTerm) >= 0) filtered.push(n);
     }
   }
 
-  var roleFilter = nodeRoleFilter.value;
-  if (roleFilter !== 'all') {
-    filtered = filtered.filter(function(n) {
-      return n.role === roleFilter;
-    });
+  if (state.roleFilter !== 'all') {
+    var roleFiltered = [];
+    for (var r = 0; r < filtered.length; r++) {
+      if (filtered[r].role === state.roleFilter) roleFiltered.push(filtered[r]);
+    }
+    filtered = roleFiltered;
   }
 
   if (state.favOnly) {
-    filtered = filtered.filter(function(n) {
-      return n.is_favorite;
-    });
+    var favFiltered = [];
+    for (var f = 0; f < filtered.length; f++) {
+      if (filtered[f].is_favorite) favFiltered.push(filtered[f]);
+    }
+    filtered = favFiltered;
   }
 
   // Sort
-  var sortBy = nodeSort.value;
+  var sortBy = state.sortBy;
   filtered.sort(function(a, b) {
     if (sortBy === 'name') return (a.long_name || a.id || '').localeCompare(b.long_name || b.id || '');
     if (sortBy === 'last_heard') return (b.last_heard || 0) - (a.last_heard || 0);
     if (sortBy === 'snr') return (b.snr !== null ? b.snr : -999) - (a.snr !== null ? a.snr : -999);
     if (sortBy === 'hops') return (a.hops_away !== null ? a.hops_away : 999) - (b.hops_away !== null ? b.hops_away : 999);
     if (sortBy === 'distance') {
-      var da = getNodeDistance(a);
-      var db = getNodeDistance(b);
-      if (da === null) da = 99999;
-      if (db === null) db = 99999;
+      var da = getNodeDistance(a); var db = getNodeDistance(b);
+      if (da === null) da = 99999; if (db === null) db = 99999;
       return da - db;
     }
     return 0;
@@ -315,24 +442,25 @@ function renderNodes(data) {
   }
 
   var html = '';
-  for (var j = 0; j < filtered.length; j++) {
-    var node = filtered[j];
+  for (var k = 0; k < filtered.length; k++) {
+    var node = filtered[k];
     var name = node.long_name || node.short_name || node.id || 'unknown';
     var roleTag = '';
     if (node.role) roleTag = ' [' + node.role + ']';
     var favStar = node.is_favorite ? ' *' : '';
+    var nodeId = escapeHtml(node.id || '');
 
-    html += '<div class="node-card' + (node.is_favorite ? ' node-fav' : '') + '" data-nodeid="' + escapeHtml(node.id || '') + '">';
+    html += '<div class="node-card' + (node.is_favorite ? ' node-fav' : '') + '" data-nodeid="' + nodeId + '">';
     html += '<div class="node-name">' + escapeHtml(name) + favStar + roleTag + '</div>';
-    html += '<div class="node-id">' + escapeHtml(node.id || '') + '</div>';
+    html += '<div class="node-id">' + nodeId + '</div>';
 
     // Position + distance
     if (node.position) {
       var lat = node.position.lat;
       var lon = node.position.lon;
       var alt = node.position.alt;
-      html += '<div class="node-pos">' +
-        (lat !== undefined ? lat.toFixed(5) : '--') + ', ' +
+      html += '<div class="node-pos">';
+      html += (lat !== undefined ? lat.toFixed(5) : '--') + ', ' +
         (lon !== undefined ? lon.toFixed(5) : '--');
       if (alt !== undefined && alt !== null) html += ' alt:' + alt + 'm';
       var dist = getNodeDistance(node);
@@ -363,13 +491,14 @@ function renderNodes(data) {
     if (node.snr !== undefined && node.snr !== null) html += '<span class="tele-meter">snr:' + node.snr + 'dB</span>';
     if (node.hops_away !== undefined && node.hops_away !== null) html += '<span class="tele-meter">hops:' + node.hops_away + '</span>';
     if (node.via_mqtt) html += '<span class="tele-meter">mqtt</span>';
+    if (node.uptime) html += '<span class="tele-meter">up:' + formatUptime(node.uptime) + '</span>';
     html += '<span class="tele-meter">last:' + timeAgo(node.last_heard) + '</span>';
     html += '</div>';
 
     // Actions
     html += '<div class="node-actions">';
-    html += '<button class="btn btn-mini" data-action="dm" data-nodeid="' + escapeHtml(node.id || '') + '">msg</button>';
-    html += '<button class="btn btn-mini" data-action="fav" data-nodeid="' + escapeHtml(node.id || '') + '">' + (node.is_favorite ? 'unfav' : 'fav') + '</button>';
+    html += '<button class="btn btn-mini" data-action="dm" data-nodeid="' + nodeId + '">msg</button>';
+    html += '<button class="btn btn-mini" data-action="fav" data-nodeid="' + nodeId + '">' + (node.is_favorite ? 'unfav' : 'fav') + '</button>';
     html += '</div>';
 
     html += '</div>';
@@ -379,57 +508,182 @@ function renderNodes(data) {
 
   // Wire action buttons
   var actionBtns = nodeList.querySelectorAll('[data-action]');
-  for (var k = 0; k < actionBtns.length; k++) {
+  for (var a = 0; a < actionBtns.length; a++) {
     (function(btn) {
       btn.addEventListener('click', function(e) {
         e.stopPropagation();
         var action = btn.getAttribute('data-action');
-        var nodeId = btn.getAttribute('data-nodeid');
-        if (action === 'dm') {
-          setDMTarget(nodeId);
-        } else if (action === 'fav') {
-          toggleFavorite(nodeId).then(function() {
-            pollAll();
-          });
-        }
+        var nid = btn.getAttribute('data-nodeid');
+        if (action === 'dm') setDMTarget(nid);
+        else if (action === 'fav') toggleFavorite(nid).then(function() { pollAll(); });
       });
-    })(actionBtns[k]);
+    })(actionBtns[a]);
+  }
+
+  // Wire long-press on node cards
+  wireLongPress(nodeList.querySelectorAll('.node-card'), function(nodeId) {
+    var node = state.nodeCache[nodeId];
+    if (node) showNodeDetails(node);
+  });
+}
+
+function formatUptime(seconds) {
+  if (!seconds || seconds <= 0) return '--';
+  var days = Math.floor(seconds / 86400);
+  var hours = Math.floor((seconds % 86400) / 3600);
+  if (days > 0) return days + 'd' + hours + 'h';
+  var mins = Math.floor((seconds % 3600) / 60);
+  if (hours > 0) return hours + 'h' + mins + 'm';
+  return mins + 'm';
+}
+
+function showNodeDetails(node) {
+  var name = node.long_name || node.short_name || node.id || 'unknown';
+  var html = '<div class="info-grid">';
+  html += infoRow('name', name);
+  html += infoRow('short name', node.short_name || '--');
+  html += infoRow('node id', node.id || '--');
+  html += infoRow('role', node.role || '--');
+  html += infoRow('hardware', node.hw_model || '--');
+  html += infoRow('last heard', timeAgo(node.last_heard));
+  if (node.snr !== undefined && node.snr !== null) html += infoRow('snr', node.snr + ' dB');
+  if (node.hops_away !== undefined && node.hops_away !== null) html += infoRow('hops away', node.hops_away);
+  if (node.via_mqtt) html += infoRow('via mqtt', 'yes');
+  if (node.is_favorite) html += infoRow('favorite', 'yes');
+  html += '</div>';
+
+  if (node.position) {
+    html += '<div style="margin-top:12px;font-weight:bold;font-size:12px;text-transform:uppercase;">position</div>';
+    html += '<div class="info-grid">';
+    html += infoRow('lat', node.position.lat !== undefined ? node.position.lat.toFixed(6) : '--');
+    html += infoRow('lon', node.position.lon !== undefined ? node.position.lon.toFixed(6) : '--');
+    if (node.position.alt !== undefined && node.position.alt !== null) html += infoRow('altitude', node.position.alt + 'm');
+    var dist = getNodeDistance(node);
+    if (dist !== null) {
+      html += infoRow('distance', dist.toFixed(2) + ' km');
+      var brng = bearing(state.homeLat, state.homeLon, node.position.lat, node.position.lon);
+      if (brng) html += infoRow('bearing', brng);
+    }
+    html += '</div>';
+  }
+
+  if (node.telemetry) {
+    var t = node.telemetry;
+    html += '<div style="margin-top:12px;font-weight:bold;font-size:12px;text-transform:uppercase;">telemetry</div>';
+    html += '<div class="info-grid">';
+    if (t.battery !== undefined && t.battery !== null) html += infoRow('battery', t.battery + '%');
+    if (t.voltage !== undefined && t.voltage !== null) html += infoRow('voltage', t.voltage.toFixed(3) + 'V');
+    if (t.temp !== undefined && t.temp !== null) html += infoRow('temp', t.temp + 'C');
+    if (t.humidity !== undefined && t.humidity !== null) html += infoRow('humidity', t.humidity + '%');
+    if (t.pressure !== undefined && t.pressure !== null) html += infoRow('pressure', t.pressure + ' hPa');
+    if (t.iaq !== undefined && t.iaq !== null) html += infoRow('iaq', t.iaq);
+    if (t.channel_util !== undefined && t.channel_util !== null) html += infoRow('ch util', t.channel_util.toFixed(1) + '%');
+    if (t.air_util !== undefined && t.air_util !== null) html += infoRow('air util', t.air_util.toFixed(1) + '%');
+    html += '</div>';
+  }
+
+  if (node.uptime) {
+    html += '<div style="margin-top:12px;font-weight:bold;font-size:12px;text-transform:uppercase;">device</div>';
+    html += '<div class="info-grid">';
+    html += infoRow('uptime', formatUptime(node.uptime));
+    html += '</div>';
+  }
+
+  // DM button in details
+  html += '<div style="margin-top:16px;"><button class="btn" id="detailsDmBtn">send DM</button></div>';
+
+  showDetails(name, html);
+
+  var dmBtn = document.getElementById('detailsDmBtn');
+  if (dmBtn) {
+    dmBtn.addEventListener('click', function() {
+      detailsOverlay.classList.remove('active');
+      setDMTarget(node.id);
+      switchTab('messages');
+    });
   }
 }
 
-function getNodeDistance(node) {
-  if (!node.position || !node.position.lat || state.homeLat === null) return null;
-  return calcDistance(state.homeLat, state.homeLon, node.position.lat, node.position.lon);
+function infoRow(label, value) {
+  return '<div class="info-row"><span class="info-label">' + escapeHtml(label) + '</span><span class="info-val">' + escapeHtml(String(value)) + '</span></div>';
 }
 
-// --- RENDER: CHANNELS ---
-var channelFilter = 'all';
+// --- LONG PRESS ---
+function wireLongPress(elements, callback) {
+  for (var i = 0; i < elements.length; i++) {
+    (function(el) {
+      var timer = null;
+      var touched = false;
+
+      el.addEventListener('touchstart', function(e) {
+        touched = true;
+        timer = setTimeout(function() {
+          timer = null;
+          var nodeId = el.getAttribute('data-nodeid');
+          var msgIdx = el.getAttribute('data-msgidx');
+          if (nodeId) callback(nodeId);
+          else if (msgIdx) callback(msgIdx);
+        }, 500);
+      });
+
+      el.addEventListener('touchend', function() {
+        if (timer) { clearTimeout(timer); timer = null; }
+        touched = false;
+      });
+
+      el.addEventListener('touchmove', function() {
+        if (timer) { clearTimeout(timer); timer = null; }
+        touched = false;
+      });
+
+      // Mouse fallback (for testing)
+      el.addEventListener('mousedown', function(e) {
+        if (touched) return;
+        timer = setTimeout(function() {
+          timer = null;
+          var nodeId = el.getAttribute('data-nodeid');
+          var msgIdx = el.getAttribute('data-msgidx');
+          if (nodeId) callback(nodeId);
+          else if (msgIdx) callback(msgIdx);
+        }, 500);
+      });
+
+      el.addEventListener('mouseup', function() {
+        if (timer) { clearTimeout(timer); timer = null; }
+      });
+
+      el.addEventListener('mouseleave', function() {
+        if (timer) { clearTimeout(timer); timer = null; }
+      });
+    })(elements[i]);
+  }
+}
+
+// --- RENDER: CHANNELS (no disabled, no filter) ---
 function renderChannels(data) {
   if (!data || !data.channels) return;
   var channels = data.channels;
   state.channels = channels;
 
-  var filtered = channels;
-  if (channelFilter === 'active') {
-    filtered = channels.filter(function(c) { return c.role !== 'DISABLED'; });
-  } else if (channelFilter === 'disabled') {
-    filtered = channels.filter(function(c) { return c.role === 'DISABLED'; });
+  // Hide disabled channels entirely
+  var active = [];
+  for (var i = 0; i < channels.length; i++) {
+    if (channels[i].role !== 'DISABLED') active.push(channels[i]);
   }
 
-  if (filtered.length === 0) {
-    channelList.innerHTML = '<div class="empty-state"><div class="empty-title">no channels</div><div class="empty-sub">no ' + channelFilter + ' channels</div></div>';
+  if (active.length === 0) {
+    channelList.innerHTML = '<div class="empty-state"><div class="empty-title">no channels</div><div class="empty-sub">no active channels</div></div>';
     return;
   }
 
   var html = '';
-  for (var i = 0; i < filtered.length; i++) {
-    var ch = filtered[i];
+  for (var j = 0; j < active.length; j++) {
+    var ch = active[j];
     var roleTag = '';
     if (ch.role === 'PRIMARY') roleTag = ' [PRIMARY]';
     else if (ch.role === 'SECONDARY') roleTag = ' [SECONDARY]';
-    else if (ch.role === 'DISABLED') roleTag = ' [DISABLED]';
 
-    html += '<div class="channel-card' + (ch.role === 'DISABLED' ? ' channel-disabled' : '') + '">';
+    html += '<div class="channel-card">';
     html += '<div class="channel-name">' + escapeHtml(ch.name || ('ch' + ch.index)) + roleTag + '</div>';
     html += '<div class="channel-meta">index ' + ch.index;
     if (ch.uplink_enabled) html += ' - up:on'; else html += ' - up:off';
@@ -482,16 +736,9 @@ function renderChannelUrl(status) {
   channelUrlBox.innerHTML = '<div class="info-url">' + escapeHtml(status.channel_url) + '</div>';
 }
 
-function infoRow(label, value) {
-  return '<div class="info-row"><span class="info-label">' + escapeHtml(label) + '</span><span class="info-val">' + escapeHtml(String(value)) + '</span></div>';
-}
-
 // --- DM ---
 function setDMTarget(nodeId) {
-  if (state.dmTarget === nodeId) {
-    clearDMTarget();
-    return;
-  }
+  if (state.dmTarget === nodeId) { clearDMTarget(); return; }
   state.dmTarget = nodeId;
   var name = getNodeName(nodeId);
   inputField.placeholder = 'DM to ' + name + '...';
@@ -512,13 +759,10 @@ function pollAll() {
     if (status) {
       state.connected = status.connected;
       if (status.connected) {
-        var nodeCount = status.node_count || 0;
-        var msgCount = status.message_count || 0;
-        setStatus('online - ' + nodeCount + ' nodes - ' + msgCount + ' msgs', 'connected');
+        setStatus('online - ' + (status.node_count || 0) + ' nodes - ' + (status.message_count || 0) + ' msgs', 'connected');
       } else {
         setStatus('offline - ' + (status.error || 'no device'), 'error');
       }
-
       if (state.activeTab === 'settings') {
         renderDeviceInfo(status);
         renderNetStats(status);
@@ -531,7 +775,6 @@ function pollAll() {
 
   if (state.activeTab === 'messages') {
     fetchMessages().then(renderMessages);
-    // Also fetch nodes for name resolution
     if (state.nodes.length === 0) fetchNodes().then(renderNodes);
   } else if (state.activeTab === 'channels') {
     fetchChannels().then(renderChannels);
@@ -561,20 +804,12 @@ function switchTab(tabName) {
   var panel = document.getElementById('panel-' + tabName);
   if (panel) panel.classList.add('active');
 
-  // Show/hide input area based on tab
-  if (tabName === 'messages') inputArea.style.display = '';
-  else inputArea.style.display = 'none';
+  inputArea.style.display = (tabName === 'messages') ? '' : 'none';
 
-  // Immediate data fetch
-  if (tabName === 'messages') {
-    fetchMessages().then(renderMessages);
-  } else if (tabName === 'channels') {
-    fetchChannels().then(renderChannels);
-  } else if (tabName === 'nodes') {
-    fetchNodes().then(renderNodes);
-  } else if (tabName === 'settings') {
-    pollAll();
-  }
+  if (tabName === 'messages') fetchMessages().then(renderMessages);
+  else if (tabName === 'channels') fetchChannels().then(renderChannels);
+  else if (tabName === 'nodes') fetchNodes().then(renderNodes);
+  else if (tabName === 'settings') pollAll();
 }
 
 // --- EVENTS ---
@@ -585,7 +820,6 @@ for (var i = 0; i < tabButtons.length; i++) {
   })(tabButtons[i]);
 }
 
-// Send message / DM
 function handleSend() {
   var text = inputField.value.trim();
   if (!text) return;
@@ -594,13 +828,8 @@ function handleSend() {
   sendMessage(text, state.dmTarget).then(function(result) {
     sendBtn.disabled = false;
     sendBtn.textContent = 'send';
-    if (result && result.ok) {
-      inputField.value = '';
-      pollAll();
-    } else {
-      var err = (result && result.error) ? result.error : 'send failed';
-      setStatus('send error: ' + err, 'error');
-    }
+   ; if (result && result.ok) { inputField.value = ''; pollAll(); }
+    else { setStatus('send error: ' + ((result && result.error) ? result.error : 'failed'), 'error'); }
   });
 }
 
@@ -609,42 +838,46 @@ inputField.addEventListener('keydown', function(e) {
   if (e.key === 'Enter') { e.preventDefault(); handleSend(); }
 });
 
-// DM target cancel
 dmTargetEl.addEventListener('click', clearDMTarget);
 
 // Node filters
 nodeSearch.addEventListener('input', function() {
   if (state.nodes.length > 0) renderNodes({ nodes: state.nodes });
 });
-nodeRoleFilter.addEventListener('change', function() {
-  if (state.nodes.length > 0) renderNodes({ nodes: state.nodes });
+
+sortBtn.addEventListener('click', function() {
+  showSelect('sort by', SORT_OPTIONS, state.sortBy, function(val) {
+    state.sortBy = val;
+    var label = 'sort: ';
+    for (var i = 0; i < SORT_OPTIONS.length; i++) {
+      if (SORT_OPTIONS[i].value === val) { label += SORT_OPTIONS[i].label; break; }
+    }
+    sortBtn.textContent = label;
+    if (state.nodes.length > 0) renderNodes({ nodes: state.nodes });
+  });
 });
-nodeSort.addEventListener('change', function() {
-  if (state.nodes.length > 0) renderNodes({ nodes: state.nodes });
+
+roleBtn.addEventListener('click', function() {
+  showSelect('filter by role', ROLE_OPTIONS, state.roleFilter, function(val) {
+    state.roleFilter = val;
+    var label = 'role: ';
+    for (var i = 0; i < ROLE_OPTIONS.length; i++) {
+      if (ROLE_OPTIONS[i].value === val) { label += ROLE_OPTIONS[i].label; break; }
+    }
+    roleBtn.textContent = label;
+    if (state.nodes.length > 0) renderNodes({ nodes: state.nodes });
+  });
 });
+
 favOnlyBtn.addEventListener('click', function() {
   state.favOnly = !state.favOnly;
   favOnlyBtn.classList.toggle('active');
   if (state.nodes.length > 0) renderNodes({ nodes: state.nodes });
 });
 
-// Message search
 msgSearch.addEventListener('input', function() {
   if (state.messages.length > 0) renderMessages({ messages: state.messages });
 });
-
-// Channel filters
-var chFilterBtns = document.querySelectorAll('[data-chfilter]');
-for (var j = 0; j < chFilterBtns.length; j++) {
-  (function(btn) {
-    btn.addEventListener('click', function() {
-      channelFilter = btn.getAttribute('data-chfilter');
-      for (var k = 0; k < chFilterBtns.length; k++) chFilterBtns[k].classList.remove('active');
-      btn.classList.add('active');
-      if (state.channels.length > 0) renderChannels({ channels: state.channels });
-    });
-  })(chFilterBtns[j]);
-}
 
 // Settings
 testConnBtn.addEventListener('click', function() {
@@ -657,47 +890,36 @@ testConnBtn.addEventListener('click', function() {
   });
 });
 
-saveSettingsBtn.addEventListener('click', function() {
-  saveSettings();
-});
+saveSettingsBtn.addEventListener('click', function() { saveSettings(); });
 
-// Admin actions
+// Admin
 document.getElementById('rebootBtn').addEventListener('click', function() {
   adminInfo.textContent = 'sending reboot...';
-  adminAction('reboot').then(function(r) {
-    adminInfo.textContent = r.ok ? 'reboot sent' : ('error: ' + (r.error || 'failed'));
-  });
+  adminAction('reboot').then(function(r) { adminInfo.textContent = r.ok ? 'reboot sent' : 'error: ' + (r.error || 'failed'); });
 });
 document.getElementById('shutdownBtn').addEventListener('click', function() {
   adminInfo.textContent = 'sending shutdown...';
-  adminAction('shutdown').then(function(r) {
-    adminInfo.textContent = r.ok ? 'shutdown sent' : ('error: ' + (r.error || 'failed'));
-  });
+  adminAction('shutdown').then(function(r) { adminInfo.textContent = r.ok ? 'shutdown sent' : 'error: ' + (r.error || 'failed'); });
 });
 document.getElementById('resetNodesBtn').addEventListener('click', function() {
   adminInfo.textContent = 'resetting nodedb...';
-  adminAction('reset-nodedb').then(function(r) {
-    adminInfo.textContent = r.ok ? 'nodedb reset sent' : ('error: ' + (r.error || 'failed'));
-  });
+  adminAction('reset-nodedb').then(function(r) { adminInfo.textContent = r.ok ? 'nodedb reset' : 'error: ' + (r.error || 'failed'); });
 });
 
-// Theme toggle button
+// Theme
 document.getElementById('themeBtn').addEventListener('click', function() {
   var isDark = document.body.getAttribute('data-theme') === 'dark';
-  if (isDark) {
-    document.body.removeAttribute('data-theme');
-    localStorage.setItem('mesh_kindle_theme', 'light');
-  } else {
-    document.body.setAttribute('data-theme', 'dark');
-    localStorage.setItem('mesh_kindle_theme', 'dark');
-  }
+  if (isDark) { document.body.removeAttribute('data-theme'); localStorage.setItem('mesh_kindle_theme', 'light'); }
+  else { document.body.setAttribute('data-theme', 'dark'); localStorage.setItem('mesh_kindle_theme', 'dark'); }
 });
+
+// Serve NotoEmoji font
+// The server already serves .ttf files via SimpleHTTPRequestHandler if path matches
 
 // --- INIT ---
 loadSettings();
 startPolling();
 
-// Register service worker
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('sw.js').catch(function(e) {});
+  navigator.serviceWorker.register('sw.js').catch(function() {});
 }

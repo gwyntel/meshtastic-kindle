@@ -484,6 +484,8 @@ class MeshtasticProxyHandler(http.server.SimpleHTTPRequestHandler):
             self.serve_file('style.css', 'text/css')
         elif parsed.path == '/app.js':
             self.serve_file('app.js', 'application/javascript')
+        elif parsed.path == '/NotoEmoji.ttf':
+            self.serve_file('NotoEmoji.ttf', 'application/x-font-ttf')
         elif parsed.path.startswith('/api/'):
             self.handle_api(parsed)
         else:
