@@ -9,7 +9,7 @@ import json
 from PIL import Image, ImageDraw, ImageFont
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'emoji')
-FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'NotoEmoji-Mono.ttf')
+FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'OpenMoji-Black.ttf')
 PNG_SIZE = 48
 
 # All emoji codepoints from Unicode 15.1 ranges
