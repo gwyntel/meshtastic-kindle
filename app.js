@@ -341,7 +341,7 @@ selectCancel.addEventListener('click', function() {
 
 // --- DETAILS MODAL ---
 function showDetails(title, html) {
-  detailsTitle.textContent = title;
+  detailsTitle.innerHTML = title;
   detailsContent.innerHTML = html;
   detailsOverlay.classList.add('active');
 }
