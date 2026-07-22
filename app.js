@@ -183,6 +183,12 @@ function emojiToHtml(text) {
       result += emojiImg(code);
     } else if (code >= 0x2300 && code <= 0x23FF) {
       result += emojiImg(code);
+    } else if (code >= 0x12000 && code <= 0x1247F) {
+      // Cuneiform
+      result += emojiImg(code);
+    } else if (code >= 0x13000 && code <= 0x1342F) {
+      // Egyptian Hieroglyphs (future)
+      result += emojiImg(code);
     } else if (code === 0x20E3 || code === 0xFE0F || code === 0xFE0E || code === 0x200D) {
       // Skip variation selectors and ZWJ
       continue;
@@ -248,9 +254,16 @@ function renderText(text) {
     var cp = 0x10000 + ((match.charCodeAt(0) - 0xD800) << 10) + (match.charCodeAt(1) - 0xDC00);
     return emojiImg(cp);
   });
-  // Replace single-char emojis (misc symbols, dingbats, etc)
-  html = html.replace(/[\u2300-\u23FF\u2600-\u27BF\u2B00-\u2BFF]/g, function(match) {
-    return emojiImg(match.charCodeAt(0));
+  // Replace single-char emojis (misc symbols, dingbats, cuneiform, etc)
+  html = html.replace(/[\u2300-\u23FF\u2600-\u27BF\u2B00-\u2BFF\u12000-\u1247F\u13000-\u1342F]/g, function(match) {
+    // Handle surrogate pairs for codepoints > U+FFFF
+    var cp;
+    if (match.charCodeAt(0) >= 0xD800 && match.charCodeAt(0) <= 0xDBFF) {
+      cp = 0x10000 + ((match.charCodeAt(0) - 0xD800) << 10) + (match.charCodeAt(1) - 0xDC00);
+    } else {
+      cp = match.charCodeAt(0);
+    }
+    return emojiImg(cp);
   });
   // Remove variation selectors
   html = html.replace(/[\uFE0F\uFE0E\u200D]/g, '');
