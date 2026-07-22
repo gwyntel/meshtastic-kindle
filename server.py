@@ -521,6 +521,18 @@ class MeshtasticProxyHandler(http.server.SimpleHTTPRequestHandler):
             self.serve_file('app.js', 'application/javascript')
         elif parsed.path == '/NotoEmoji.ttf':
             self.serve_file('NotoEmoji.ttf', 'application/x-font-ttf')
+        elif parsed.path.startswith('/emoji/'):
+            # Serve individual emoji PNG
+            emoji_name = parsed.path.split('/')[-1]
+            # Sanitize — only allow alphanumeric + .png
+            if emoji_name.endswith('.png') and all(c.isalnum() or c == '.' for c in emoji_name):
+                emoji_path = Path(__file__).parent / 'emoji' / emoji_name
+                if emoji_path.exists():
+                    self.serve_file('emoji/' + emoji_name, 'image/png')
+                else:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+            else:
+                self.send_error(HTTPStatus.NOT_FOUND)
         elif parsed.path.startswith('/api/'):
             self.handle_api(parsed)
         else:

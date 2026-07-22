@@ -165,7 +165,42 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// Emoji: render as grayscale PNG images (Kindle can't load custom fonts)
+function emojiToHtml(text) {
+  if (!text) return '';
+  var result = '';
+  for (var i = 0; i < text.length; i++) {
+    var code = text.charCodeAt(i);
+    // Check if this is a high surrogate (emoji > U+FFFF)
+    if (code >= 0xD800 && code <= 0xDBFF && i + 1 < text.length) {
+      var low = text.charCodeAt(i + 1);
+      var cp = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+      result += emojiImg(cp);
+      i++; // skip low surrogate
+    } else if (code >= 0x2600 && code <= 0x27BF) {
+      result += emojiImg(code);
+    } else if (code >= 0x2B00 && code <= 0x2BFF) {
+      result += emojiImg(code);
+    } else if (code >= 0x2300 && code <= 0x23FF) {
+      result += emojiImg(code);
+    } else if (code === 0x20E3 || code === 0xFE0F || code === 0xFE0E || code === 0x200D) {
+      // Skip variation selectors and ZWJ
+      continue;
+    } else {
+      result += escapeHtml(text[i]);
+    }
+  }
+  return result;
+}
+
+function emojiImg(codepoint) {
+  var hex = codepoint.toString(16).toUpperCase();
+  while (hex.length < 5) hex = '0' + hex;
+  return '<img src="/emoji/U' + hex + '.png" class="emoji-img" alt="emoji">';
+}
+
 // Simple markdown renderer — **bold**, *italic*, `code`, ~~strike~~, [text](url)
+// Also renders emoji as PNG images
 function renderMarkdown(text) {
   if (!text) return '';
   // First escape HTML
@@ -183,6 +218,42 @@ function renderMarkdown(text) {
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="md-link">$1</a>');
   // Line breaks
   html = html.replace(/\n/g, '<br>');
+  return html;
+}
+
+// Render text with both emoji images and markdown
+function renderText(text) {
+  if (!text) return '';
+  // Split by lines first, process markdown, then emoji
+  // We need to be careful: markdown escaping already happened,
+  // but emoji characters need to be converted to <img> tags
+  // Process emoji first (on raw text), then markdown
+  var withEmoji = emojiToHtml(text);
+  // Now apply markdown on the non-img parts
+  // Since emojiToHtml already escapes HTML, we need to be careful
+  // Actually, let's do markdown first (which escapes), then emoji won't work
+  // because text is already escaped... 
+  // Better: render markdown on escaped text, then the emoji chars are still there
+  // and we convert them. But markdown already escaped them...
+  // Simplest approach: do emoji replacement on the final HTML, replacing
+  // emoji chars (which survived escaping) with <img> tags
+  var html = renderMarkdown(text);
+  // Now replace emoji chars in the generated HTML
+  // The escapeHtml call in renderMarkdown converts < to &lt; etc
+  // but emoji chars pass through unchanged
+  // We need to walk the HTML and replace emoji chars that aren't inside tags
+  // Actually, since emoji chars are never inside HTML tags, we can use regex
+  // Replace emoji surrogate pairs and single chars
+  html = html.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, function(match) {
+    var cp = 0x10000 + ((match.charCodeAt(0) - 0xD800) << 10) + (match.charCodeAt(1) - 0xDC00);
+    return emojiImg(cp);
+  });
+  // Replace single-char emojis (misc symbols, dingbats, etc)
+  html = html.replace(/[\u2300-\u23FF\u2600-\u27BF\u2B00-\u2BFF]/g, function(match) {
+    return emojiImg(match.charCodeAt(0));
+  });
+  // Remove variation selectors
+  html = html.replace(/[\uFE0F\uFE0E\u200D]/g, '');
   return html;
 }
 
@@ -343,7 +414,7 @@ function renderMessages(data) {
 
     html += '<div class="' + msgClass + '" data-msgidx="' + k + '">' +
       '<div class="message-meta">' + escapeHtml(fromName) + dmTag + ownTag + ' - ch' + (m.channel || 0) + ' - ' + time + hops + ' - ' + transport + '</div>' +
-      '<div class="message-text">' + renderMarkdown(m.text) + '</div>' +
+      '<div class="message-text">' + renderText(m.text) + '</div>' +
       '</div>';
   }
 
@@ -383,7 +454,7 @@ function showMsgDetails(msg) {
       html += infoRow('sender role', senderNode.role);
   }
   html += '</div>';
-  html += '<div style="margin-top:12px;font-size:14px;white-space:pre-wrap;word-break:break-word;">' + renderMarkdown(msg.text) + '</div>';
+  html += '<div style="margin-top:12px;font-size:14px;white-space:pre-wrap;word-break:break-word;">' + renderText(msg.text) + '</div>';
   showDetails('message details', html);
 }
 
@@ -467,7 +538,7 @@ function renderNodes(data) {
     var nodeId = escapeHtml(node.id || '');
 
     html += '<div class="node-card' + (node.is_favorite ? ' node-fav' : '') + '" data-nodeid="' + nodeId + '">';
-    html += '<div class="node-name">' + escapeHtml(name) + favStar + roleTag + '</div>';
+    html += '<div class="node-name">' + emojiToHtml(name) + favStar + roleTag + '</div>';
     html += '<div class="node-id">' + nodeId + '</div>';
 
     // Position + distance
@@ -608,7 +679,7 @@ function showNodeDetails(node) {
   // DM button in details
   html += '<div style="margin-top:16px;"><button class="btn" id="detailsDmBtn">send DM</button></div>';
 
-  showDetails(name, html);
+  showDetails(emojiToHtml(name), html);
 
   var dmBtn = document.getElementById('detailsDmBtn');
   if (dmBtn) {

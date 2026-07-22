@@ -26,6 +26,27 @@ html, body {
   padding: 0;
 }
 
+/* Emoji images (grayscale PNGs rendered from NotoEmoji monochrome font) */
+.emoji-img {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  vertical-align: middle;
+  margin: 0 1px;
+}
+
+.node-name .emoji-img,
+.details-title .emoji-img {
+  width: 20px;
+  height: 20px;
+}
+
+.message-text .emoji-img {
+  width: 18px;
+  height: 18px;
+}
+
+/* Old @font-face kept for fallback but not used — images instead */
 /* Emoji class — uses Noto Emoji monochrome font */
 .emoji {
   font-family: 'NotoEmoji', Arial, sans-serif;
