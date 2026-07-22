@@ -557,7 +557,7 @@ function renderNodes(data) {
     // Row 1: badge + name + lock + last heard
     html += '<div class="node-row1">';
     if (shortName) {
-      html += '<span class="node-badge">' + escapeHtml(shortName) + '</span>';
+      html += '<span class="node-badge">' + emojiToHtml(shortName) + '</span>';
     }
     html += '<span class="node-name">' + emojiToHtml(name) + favStar + roleTag + '</span>';
     if (node.is_secure) html += '<span class="node-lock">[lock]</span>';
