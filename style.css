@@ -26,7 +26,8 @@ html, body {
   padding: 0;
 }
 
-/* Emoji images (grayscale PNGs rendered from NotoEmoji monochrome font) */
+/* Emoji images — transparent RGBA PNGs, black glyphs */
+/* In dark mode, invert so black glyphs become white */
 .emoji-img {
   display: inline-block;
   width: 16px;
@@ -44,6 +45,21 @@ html, body {
 .message-text .emoji-img {
   width: 18px;
   height: 18px;
+}
+
+/* Invert emoji to white on dark backgrounds */
+[data-theme="dark"] .emoji-img {
+  filter: invert(1);
+}
+
+/* Inside inverted badge (black bg, white text) — also invert */
+.node-badge .emoji-img {
+  filter: invert(1);
+}
+
+/* But in dark mode the badge is light bg, so don't invert */
+[data-theme="dark"] .node-badge .emoji-img {
+  filter: none;
 }
 
 /* Old @font-face kept for fallback but not used — images instead */

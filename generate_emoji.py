@@ -45,8 +45,8 @@ def main():
             
             ch = chr(cp)
             
-            # Render to grayscale image
-            img = Image.new('L', (PNG_SIZE, PNG_SIZE), 255)
+            # Render to RGBA image with transparent background
+            img = Image.new('RGBA', (PNG_SIZE, PNG_SIZE), (255, 255, 255, 0))
             draw = ImageDraw.Draw(img)
             
             # Get glyph bounding box for centering
@@ -59,14 +59,14 @@ def main():
                     continue
                 x = (PNG_SIZE - w) // 2 - bbox[0]
                 y = (PNG_SIZE - h) // 2 - bbox[1]
-                draw.text((x, y), ch, font=font, fill=0)
+                draw.text((x, y), ch, font=font, fill=(0, 0, 0, 255))
             except Exception:
                 empty += 1
                 continue
             
-            # Check if the image is actually non-blank
-            extrema = img.getextrema()
-            if extrema[0] == 255 and extrema[1] == 255:
+            # Check if the image is actually non-blank (alpha channel)
+            bbox = img.getbbox()
+            if bbox is None:
                 empty += 1
                 continue
             

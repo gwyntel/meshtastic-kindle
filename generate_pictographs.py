@@ -27,7 +27,7 @@ def main():
 
         for cp in range(start, end + 1):
             ch = chr(cp)
-            img = Image.new('L', (48, 48), 255)
+            img = Image.new('RGBA', (48, 48), (255, 255, 255, 0))
             draw = ImageDraw.Draw(img)
             try:
                 bbox = draw.textbbox((0, 0), ch, font=font)
@@ -37,11 +37,11 @@ def main():
                     continue
                 x = (48 - w) // 2 - bbox[0]
                 y = (48 - h) // 2 - bbox[1]
-                draw.text((x, y), ch, font=font, fill=0)
+                draw.text((x, y), ch, font=font, fill=(0, 0, 0, 255))
             except Exception:
                 continue
-            extrema = img.getextrema()
-            if extrema[0] == 255 and extrema[1] == 255:
+            bbox_check = img.getbbox()
+            if bbox_check is None:
                 continue
             filename = 'U{:05X}.png'.format(cp)
             filepath = os.path.join(OUT_DIR, filename)
