@@ -532,60 +532,80 @@ function renderNodes(data) {
   for (var k = 0; k < filtered.length; k++) {
     var node = filtered[k];
     var name = node.long_name || node.short_name || node.id || 'unknown';
+    var shortName = node.short_name || '';
     var roleTag = '';
     if (node.role) roleTag = ' [' + node.role + ']';
     var favStar = node.is_favorite ? ' *' : '';
     var nodeId = escapeHtml(node.id || '');
+    var lastTime = timeAgo(node.last_heard);
 
     html += '<div class="node-card' + (node.is_favorite ? ' node-fav' : '') + '" data-nodeid="' + nodeId + '">';
-    html += '<div class="node-name">' + emojiToHtml(name) + favStar + roleTag + '</div>';
-    html += '<div class="node-id">' + nodeId + '</div>';
 
-    // Position + distance
+    // Row 1: badge + name + lock + last heard
+    html += '<div class="node-row1">';
+    if (shortName) {
+      html += '<span class="node-badge">' + escapeHtml(shortName) + '</span>';
+    }
+    html += '<span class="node-name">' + emojiToHtml(name) + favStar + roleTag + '</span>';
+    if (node.is_secure) html += '<span class="node-lock">[lock]</span>';
+    html += '<span class="node-last">' + lastTime + '</span>';
+    html += '</div>';
+
+    // Row 2: metrics (bat, snr, hops, via, temp)
+    html += '<div class="node-row2">';
+    if (node.telemetry) {
+      var t = node.telemetry;
+      if (t.battery !== undefined && t.battery !== null) {
+        var pwrLabel = 'PWR';
+        if (t.battery === 0) pwrLabel = 'PLG';
+        html += '<span class="node-metric">PWR ' + t.battery + '%</span>';
+      }
+      if (t.voltage !== undefined && t.voltage !== null) {
+        html += '<span class="node-metric">' + t.voltage.toFixed(1) + 'V</span>';
+      }
+      if (t.temp !== undefined && t.temp !== null) {
+        html += '<span class="node-metric">' + t.temp.toFixed(1) + 'C</span>';
+      }
+      if (t.humidity !== undefined && t.humidity !== null) {
+        html += '<span class="node-metric">' + t.humidity + '%H</span>';
+      }
+      if (t.channel_util !== undefined && t.channel_util !== null) {
+        html += '<span class="node-metric">ChUtil ' + t.channel_util.toFixed(1) + '%</span>';
+      }
+    }
+    if (node.snr !== undefined && node.snr !== null) {
+      html += '<span class="node-metric">SNR ' + node.snr + 'dB</span>';
+    }
+    if (node.hops_away !== undefined && node.hops_away !== null) {
+      html += '<span class="node-metric">Hops ' + node.hops_away + '</span>';
+    }
+    if (node.via_mqtt) html += '<span class="node-metric">MQTT</span>';
+    html += '</div>';
+
+    // Row 3: position + distance
     if (node.position) {
       var lat = node.position.lat;
       var lon = node.position.lon;
-      var alt = node.position.alt;
-      html += '<div class="node-pos">';
-      html += (lat !== undefined ? lat.toFixed(5) : '--') + ', ' +
-        (lon !== undefined ? lon.toFixed(5) : '--');
-      if (alt !== undefined && alt !== null) html += ' alt:' + alt + 'm';
       var dist = getNodeDistance(node);
+      html += '<div class="node-row3">';
       if (dist !== null) {
-        html += ' (' + dist.toFixed(1) + 'km';
+        html += '<span class="node-metric">' + dist.toFixed(1) + 'km';
         var brng = bearing(state.homeLat, state.homeLon, lat, lon);
         if (brng) html += ' ' + brng;
-        html += ')';
+        html += '</span>';
+      } else {
+        html += '<span class="node-metric">' + (lat !== undefined ? lat.toFixed(4) : '--') + ',' + (lon !== undefined ? lon.toFixed(4) : '--') + '</span>';
       }
       html += '</div>';
     }
 
-    // Telemetry
-    if (node.telemetry) {
-      var t = node.telemetry;
-      html += '<div class="node-telemetry">';
-      if (t.battery !== undefined && t.battery !== null) html += '<div class="tele-meter"><span class="tele-label">bat</span> ' + t.battery + '%</div>';
-      if (t.voltage !== undefined && t.voltage !== null) html += '<div class="tele-meter"><span class="tele-label">v</span> ' + t.voltage.toFixed(2) + '</div>';
-      if (t.temp !== undefined && t.temp !== null) html += '<div class="tele-meter"><span class="tele-label">temp</span> ' + t.temp + 'C</div>';
-      if (t.humidity !== undefined && t.humidity !== null) html += '<div class="tele-meter"><span class="tele-label">hum</span> ' + t.humidity + '%</div>';
-      if (t.channel_util !== undefined && t.channel_util !== null) html += '<div class="tele-meter"><span class="tele-label">ch</span> ' + t.channel_util.toFixed(1) + '%</div>';
-      if (t.air_util !== undefined && t.air_util !== null) html += '<div class="tele-meter"><span class="tele-label">air</span> ' + t.air_util.toFixed(1) + '%</div>';
-      html += '</div>';
-    }
-
-    // Mesh info
-    html += '<div class="node-mesh">';
-    if (node.snr !== undefined && node.snr !== null) html += '<span class="tele-meter">snr:' + node.snr + 'dB</span>';
-    if (node.hops_away !== undefined && node.hops_away !== null) html += '<span class="tele-meter">hops:' + node.hops_away + '</span>';
-    if (node.via_mqtt) html += '<span class="tele-meter">mqtt</span>';
-    if (node.uptime) html += '<span class="tele-meter">up:' + formatUptime(node.uptime) + '</span>';
-    html += '<span class="tele-meter">last:' + timeAgo(node.last_heard) + '</span>';
-    html += '</div>';
-
-    // Actions
-    html += '<div class="node-actions">';
+    // Row 4: hardware + actions
+    html += '<div class="node-row4">';
+    if (node.hw_model) html += '<span class="node-hw">' + escapeHtml(node.hw_model) + '</span>';
+    html += '<span class="node-actions">';
     html += '<button class="btn btn-mini" data-action="dm" data-nodeid="' + nodeId + '">msg</button>';
     html += '<button class="btn btn-mini" data-action="fav" data-nodeid="' + nodeId + '">' + (node.is_favorite ? 'unfav' : 'fav') + '</button>';
+    html += '</span>';
     html += '</div>';
 
     html += '</div>';
@@ -771,16 +791,37 @@ function renderChannels(data) {
     if (ch.role === 'PRIMARY') roleTag = ' [PRIMARY]';
     else if (ch.role === 'SECONDARY') roleTag = ' [SECONDARY]';
 
-    html += '<div class="channel-card">';
+    var isCurrent = (ch.index === config.channel);
+    var cls = 'channel-card' + (isCurrent ? ' channel-active' : '');
+
+    html += '<div class="' + cls + '" data-chidx="' + ch.index + '">';
     html += '<div class="channel-name">' + escapeHtml(ch.name || ('ch' + ch.index)) + roleTag + '</div>';
     html += '<div class="channel-meta">index ' + ch.index;
     if (ch.uplink_enabled) html += ' - up:on'; else html += ' - up:off';
     if (ch.downlink_enabled) html += ' - dn:on'; else html += ' - dn:off';
+    if (isCurrent) html += ' - [selected]';
     html += '</div>';
     html += '</div>';
   }
 
   channelList.innerHTML = html;
+
+  // Wire up channel tap to switch message channel
+  var cards = channelList.querySelectorAll('.channel-card');
+  for (var k = 0; k < cards.length; k++) {
+    cards[k].addEventListener('click', function() {
+      var idx = parseInt(this.getAttribute('data-chidx'), 10);
+      if (isNaN(idx)) return;
+      config.channel = idx;
+      saveConfig();
+      // Re-render channels to show selection
+      renderChannels({channels: state.channels});
+      // Switch to messages tab
+      switchTab('messages');
+      // Update banner
+      updateCtxBanner();
+    });
+  }
 }
 
 // --- RENDER: SETTINGS ---

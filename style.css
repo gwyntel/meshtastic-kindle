@@ -393,14 +393,15 @@ html, body {
   margin-left: 4px;
 }
 
-/* Node cards */
+/* Node cards — compact layout matching official app */
 .node-list > * + * {
-  margin-top: 6px;
+  margin-top: 4px;
 }
 
 .node-card {
-  padding: 8px 10px;
+  padding: 6px 8px;
   border: 1px solid #000;
+  margin-bottom: 4px;
   font-size: 12px;
 }
 
@@ -408,64 +409,82 @@ html, body {
   border-width: 2px;
 }
 
-.node-name {
+.node-row1 {
+  display: flex;
+  align-items: center;
+  margin-bottom: 3px;
+}
+
+.node-badge {
+  display: inline-block;
+  background: #000;
+  color: #fff;
+  font-weight: bold;
+  font-size: 11px;
+  padding: 2px 5px;
+  margin-right: 6px;
+  border: 1px solid #000;
+  min-width: 32px;
+  text-align: center;
+}
+
+[data-theme="dark"] .node-badge {
+  background: #e8e8e8;
+  color: #0a0a0a;
+  border-color: #e8e8e8;
+}
+
+.node-row1 .node-name {
+  flex: 1;
   font-size: 14px;
   font-weight: bold;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-lock {
+  font-size: 10px;
+  margin-left: 3px;
+}
+
+.node-last {
+  font-size: 11px;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
+.node-row2, .node-row3 {
   margin-bottom: 2px;
-}
-
-.node-id {
-  font-family: "Courier New", monospace;
   font-size: 11px;
-  opacity: 0.6;
-  margin-bottom: 4px;
 }
 
-.node-pos {
-  font-family: "Courier New", monospace;
-  font-size: 11px;
-  margin-bottom: 4px;
+.node-metric {
+  display: inline-block;
+  margin-right: 8px;
+  white-space: nowrap;
 }
 
-.node-telemetry {
+.node-row4 {
   display: flex;
-  flex-wrap: wrap;
-  margin-top: 4px;
-  margin-bottom: 4px;
+  align-items: center;
+  margin-top: 3px;
 }
 
-.node-telemetry > * + * {
-  margin-left: 12px;
+.node-hw {
+  font-size: 10px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.node-mesh {
-  display: flex;
-  flex-wrap: wrap;
-  margin-bottom: 6px;
-}
-
-.node-mesh > * + * {
-  margin-left: 10px;
-}
-
-.node-mesh .tele-meter {
-  opacity: 0.7;
-}
-
-.tele-meter {
-  font-size: 11px;
-  font-family: "Courier New", monospace;
-}
-
-.tele-label {
-  font-size: 9px;
-  text-transform: uppercase;
-  opacity: 0.5;
+.node-row4 .node-actions {
+  margin-left: 6px;
 }
 
 .node-actions {
   display: flex;
-  margin-top: 4px;
 }
 
 .node-actions > * + * {
@@ -478,6 +497,16 @@ html, body {
   border: 1px solid #000;
   font-size: 12px;
   margin-bottom: 4px;
+}
+
+.channel-card.channel-active {
+  border: 2px solid #000;
+  background: #f0f0f0;
+}
+
+[data-theme="dark"] .channel-card.channel-active {
+  border-color: #e8e8e8;
+  background: #1a1a1a;
 }
 
 .channel-name {
