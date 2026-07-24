@@ -126,8 +126,11 @@ function fetchJSON(url) {
 }
 
 function fetchStatus() { return fetchJSON(config.serverUrl + '/api/status'); }
-function fetchMessages() { return fetchJSON(config.serverUrl + '/api/messages'); }
-function fetchNodes() { return fetchJSON(config.serverUrl + '/api/nodes'); }
+function fetchMessages() {
+  var url = config.serverUrl + '/api/messages?limit=200';
+  return fetchJSON(url);
+}
+function fetchNodes() { return fetchJSON(config.serverUrl + '/api/nodes?limit=500'); }
 function fetchChannels() { return fetchJSON(config.serverUrl + '/api/channels'); }
 
 function sendMessage(text, destNode) {
