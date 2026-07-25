@@ -162,6 +162,15 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// Emoji detection — numeric comparison, no regex character-class \u bugs
+function isEmojiCodepoint(cp) {
+  return (cp >= 0x2300 && cp <= 0x23FF)   // Misc Technical
+      || (cp >= 0x2600 && cp <= 0x27BF)   // Misc Symbols, Dingbats
+      || (cp >= 0x2B00 && cp <= 0x2BFF)   // Misc Symbols and Arrows
+      || (cp >= 0x12000 && cp <= 0x1247F) // Cuneiform
+      || (cp >= 0x13000 && cp <= 0x1342F); // Egyptian Hieroglyphs
+}
+
 function emojiImg(codepoint) {
   var hex = codepoint.toString(16).toUpperCase();
   while (hex.length < 5) hex = '0' + hex;
@@ -169,9 +178,35 @@ function emojiImg(codepoint) {
 }
 
 function emojiToHtml(text) {
-  // Kindle can't render emoji — just escape HTML and return clean text
-  // (The emoji→PNG pipeline adds complexity for zero benefit on e-ink)
-  return escapeHtml(text || '');
+  // Convert emoji chars to PNG <img> tags via numeric codepoint checks.
+  // Avoids regex character-class \u bugs by using raw number comparison.
+  if (!text) return '';
+  var result = '';
+  for (var i = 0; i < text.length; i++) {
+    var code = text.charCodeAt(i);
+    // Surrogate pair → supplementary plane codepoint
+    if (code >= 0xD800 && code <= 0xDBFF && i + 1 < text.length) {
+      var low = text.charCodeAt(i + 1);
+      if (low >= 0xDC00 && low <= 0xDFFF) {
+        var cp = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+        if (isEmojiCodepoint(cp)) {
+          result += emojiImg(cp);
+          i++;
+          continue;
+        }
+      }
+    }
+    // Variation selectors, ZWJ, combining encloser — strip
+    if (code === 0xFE0F || code === 0xFE0E || code === 0x200D || code === 0x20E3) {
+      continue;
+    }
+    if (isEmojiCodepoint(code)) {
+      result += emojiImg(code);
+    } else {
+      result += escapeHtml(text[i]);
+    }
+  }
+  return result;
 }
 
 function renderMarkdown(text) {
@@ -187,10 +222,35 @@ function renderMarkdown(text) {
 }
 
 function renderText(text) {
+  // Renders text → emoji PNGs for emoji chars, clean HTML otherwise.
+  // Uses renderMarkdown first (escapes HTML), then emoji detection pass.
   if (!text) return '';
-  // Kindle can't display emoji — just render clean text, no emoji→PNG pipeline
-  // Zero-width joiners and variation selectors stripped to avoid tofu
-  return renderMarkdown(text).replace(/[\uFE0F\uFE0E\u200D]/g, '');
+  var md = renderMarkdown(text);
+  // renderMarkdown already HTML-escaped — detect emoji chars in escaped text
+  var result = '';
+  for (var i = 0; i < md.length; i++) {
+    var code = md.charCodeAt(i);
+    if (code >= 0xD800 && code <= 0xDBFF && i + 1 < md.length) {
+      var low = md.charCodeAt(i + 1);
+      if (low >= 0xDC00 && low <= 0xDFFF) {
+        var cp = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+        if (isEmojiCodepoint(cp)) {
+          result += emojiImg(cp);
+          i++;
+          continue;
+        }
+      }
+    }
+    if (code === 0xFE0F || code === 0xFE0E || code === 0x200D || code === 0x20E3) {
+      continue;
+    }
+    if (isEmojiCodepoint(code)) {
+      result += emojiImg(code);
+    } else {
+      result += md[i];
+    }
+  }
+  return result;
 }
 
 function formatTime(timestamp) {

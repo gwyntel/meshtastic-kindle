@@ -4,9 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#ffffff">
-  <link rel="manifest" href="manifest.json">
+  <link rel="manifest" href="manifest.json?v=3">
   <title>mesh</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
 <div class="app" id="app">
@@ -157,6 +157,19 @@
   </div>
 </div>
 
-<script src="app.js"></script>
+<script src="app.js?v=3"></script>
+<script>
+// Self-destructing service worker — clears old caches on first load, then unregisters
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').then(function () {
+    // SW self-destructs after activation — it unregisters and clears caches
+  }).catch(function () {
+    // If registration fails, still clear old SWs
+    navigator.serviceWorker.getRegistrations().then(function (regs) {
+      regs.forEach(function (r) { r.unregister(); });
+    });
+  });
+}
+</script>
 </body>
 </html>
