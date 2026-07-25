@@ -102,11 +102,8 @@ function loadSettings() {
   if (theme === 'dark') document.body.setAttribute('data-theme', 'dark');
   var since = localStorage.getItem('mesh_since');
   if (since !== null) state.lastMessageTs = parseFloat(since) || 0;
-  // Load seen keys for dedup across sessions
-  try {
-    var raw = localStorage.getItem('mesh_seen');
-    if (raw) state.seenKeys = JSON.parse(raw);
-  } catch (e) { state.seenKeys = {}; }
+  // seenKeys built fresh each session — don't persist across page loads
+  // (lastMessageTs alone handles cross-session catch-up)
 }
 
 function saveSettings() {
@@ -370,17 +367,7 @@ function ingestMessages(data) {
     try { localStorage.setItem('mesh_since', String(maxTs)); } catch (e) {}
   }
 
-  // Persist seen keys (keep last ~2000)
-  try {
-    var keys = Object.keys(state.seenKeys);
-    if (keys.length > 2000) {
-      var trimmed = {};
-      var recent = keys.slice(-2000);
-      for (var k = 0; k < recent.length; k++) trimmed[recent[k]] = true;
-      state.seenKeys = trimmed;
-    }
-    localStorage.setItem('mesh_seen', JSON.stringify(state.seenKeys));
-  } catch (e) {}
+  // seenKeys is session-only — no persistence needed
 
   // Trim message buffer
   if (state.messages.length > 200) {

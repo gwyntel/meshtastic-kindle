@@ -115,7 +115,7 @@ def get_messages_since(db, since_ts, limit=100):
         SELECT msg_from, msg_to, channel, text, timestamp, via_mqtt,
                hops_taken, snr, is_own, relay_node, packet_id
         FROM messages
-        WHERE timestamp > ?
+        WHERE timestamp >= ?
         ORDER BY timestamp ASC
         LIMIT ?
     """, (since_ts, limit)).fetchall()
