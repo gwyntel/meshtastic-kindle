@@ -10,6 +10,7 @@ var state = {
   nodes: [],
   channels: [],
   messages: [],
+  seenKeys: {},
   nodeCache: {},
   homeLat: null,
   homeLon: null,
@@ -44,57 +45,68 @@ var ROLE_OPTIONS = [
   { value: 'SENSOR', label: 'sensor' },
 ];
 
-// --- DOM REFS ---
-var messageList = document.getElementById('messageList');
-var nodeList = document.getElementById('nodeList');
-var channelList = document.getElementById('channelList');
-var inputField = document.getElementById('inputField');
-var sendBtn = document.getElementById('sendBtn');
-var statusBar = document.getElementById('statusBar');
-var statusDot = document.getElementById('statusDot');
-var headerTitle = document.getElementById('headerTitle');
-var statNodes = document.getElementById('statNodes');
-var statMsgs = document.getElementById('statMsgs');
-var ctxBanner = document.getElementById('ctxBanner');
-var dmTargetEl = document.getElementById('dmTarget');
-var inputArea = document.getElementById('inputArea');
-var msgSearch = document.getElementById('msgSearch');
-var nodeSearch = document.getElementById('nodeSearch');
-var sortBtn = document.getElementById('sortBtn');
-var roleBtn = document.getElementById('roleBtn');
-var favOnlyBtn = document.getElementById('favOnlyBtn');
+// --- DOM REFS (lazy init) ---
+var messageList, nodeList, channelList, inputField, sendBtn, statusBar, statusDot;
+var headerTitle, statNodes, statMsgs, ctxBanner, dmTargetEl, inputArea;
+var msgSearch, nodeSearch, sortBtn, roleBtn, favOnlyBtn;
+var deviceUrlInput, channelInput, pollInput, saveSettingsBtn, settingsInfo;
+var adminInfo, deviceInfoGrid, netStatsGrid, channelUrlBox;
+var selectOverlay, selectTitle, selectOptions, selectCancel;
+var detailsOverlay, detailsTitle, detailsContent, detailsClose;
 
-// Settings
-var deviceUrlInput = document.getElementById('deviceUrlInput');
-var channelInput = document.getElementById('channelInput');
-var pollInput = document.getElementById('pollInput');
-var saveSettingsBtn = document.getElementById('saveSettingsBtn');
-var settingsInfo = document.getElementById('settingsInfo');
-var adminInfo = document.getElementById('adminInfo');
-var deviceInfoGrid = document.getElementById('deviceInfoGrid');
-var netStatsGrid = document.getElementById('netStatsGrid');
-var channelUrlBox = document.getElementById('channelUrlBox');
-
-// Overlays
-var selectOverlay = document.getElementById('selectOverlay');
-var selectTitle = document.getElementById('selectTitle');
-var selectOptions = document.getElementById('selectOptions');
-var selectCancel = document.getElementById('selectCancel');
-var detailsOverlay = document.getElementById('detailsOverlay');
-var detailsTitle = document.getElementById('detailsTitle');
-var detailsContent = document.getElementById('detailsContent');
-var detailsClose = document.getElementById('detailsClose');
+function initDomRefs() {
+  messageList = document.getElementById('messageList');
+  nodeList = document.getElementById('nodeList');
+  channelList = document.getElementById('channelList');
+  inputField = document.getElementById('inputField');
+  sendBtn = document.getElementById('sendBtn');
+  statusBar = document.getElementById('statusBar');
+  statusDot = document.getElementById('statusDot');
+  headerTitle = document.getElementById('headerTitle');
+  statNodes = document.getElementById('statNodes');
+  statMsgs = document.getElementById('statMsgs');
+  ctxBanner = document.getElementById('ctxBanner');
+  dmTargetEl = document.getElementById('dmTarget');
+  inputArea = document.getElementById('inputArea');
+  msgSearch = document.getElementById('msgSearch');
+  nodeSearch = document.getElementById('nodeSearch');
+  sortBtn = document.getElementById('sortBtn');
+  roleBtn = document.getElementById('roleBtn');
+  favOnlyBtn = document.getElementById('favOnlyBtn');
+  deviceUrlInput = document.getElementById('deviceUrlInput');
+  channelInput = document.getElementById('channelInput');
+  pollInput = document.getElementById('pollInput');
+  saveSettingsBtn = document.getElementById('saveSettingsBtn');
+  settingsInfo = document.getElementById('settingsInfo');
+  adminInfo = document.getElementById('adminInfo');
+  deviceInfoGrid = document.getElementById('deviceInfoGrid');
+  netStatsGrid = document.getElementById('netStatsGrid');
+  channelUrlBox = document.getElementById('channelUrlBox');
+  selectOverlay = document.getElementById('selectOverlay');
+  selectTitle = document.getElementById('selectTitle');
+  selectOptions = document.getElementById('selectOptions');
+  selectCancel = document.getElementById('selectCancel');
+  detailsOverlay = document.getElementById('detailsOverlay');
+  detailsTitle = document.getElementById('detailsTitle');
+  detailsContent = document.getElementById('detailsContent');
+  detailsClose = document.getElementById('detailsClose');
+}
 
 // --- SETTINGS ---
 function loadSettings() {
   var ch = localStorage.getItem('mesh_ch');
-  if (ch !== null) { config.channel = parseInt(ch, 10) || 0; channelInput.value = config.channel; }
+  if (ch !== null) { config.channel = parseInt(ch, 10) || 0; if (channelInput) channelInput.value = config.channel; }
   var poll = localStorage.getItem('mesh_poll');
-  if (poll !== null) { config.pollInterval = (parseInt(poll, 10) || 2) * 1000; pollInput.value = config.pollInterval / 1000; }
+  if (poll !== null) { config.pollInterval = (parseInt(poll, 10) || 2) * 1000; if (pollInput) pollInput.value = config.pollInterval / 1000; }
   var theme = localStorage.getItem('mesh_theme');
   if (theme === 'dark') document.body.setAttribute('data-theme', 'dark');
   var since = localStorage.getItem('mesh_since');
   if (since !== null) state.lastMessageTs = parseFloat(since) || 0;
+  // Load seen keys for dedup across sessions
+  try {
+    var raw = localStorage.getItem('mesh_seen');
+    if (raw) state.seenKeys = JSON.parse(raw);
+  } catch (e) { state.seenKeys = {}; }
 }
 
 function saveSettings() {
@@ -120,10 +132,15 @@ function fetchJSON(url) {
 }
 
 function fetchStatus() { return fetchJSON(config.serverUrl + '/api/status'); }
+
 function fetchMessages() {
-  var url = config.serverUrl + '/api/messages?since=' + state.lastMessageTs;
+  // Always fetch recent + catch-up messages from server
+  // Use lastMessageTs for catch-up; also get a small recent window for dedup refresh
+  var since = state.lastMessageTs > 0 ? state.lastMessageTs : 0;
+  var url = config.serverUrl + '/api/messages?since=' + since;
   return fetchJSON(url);
 }
+
 function fetchNodes() { return fetchJSON(config.serverUrl + '/api/nodes'); }
 function fetchChannels() { return fetchJSON(config.serverUrl + '/api/channels'); }
 
@@ -162,7 +179,7 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-// Emoji detection — numeric comparison, no regex character-class \u bugs
+// Emoji detection — numeric comparison
 function isEmojiCodepoint(cp) {
   return (cp >= 0x2300 && cp <= 0x23FF)   // Misc Technical
       || (cp >= 0x2600 && cp <= 0x27BF)   // Misc Symbols, Dingbats
@@ -178,33 +195,20 @@ function emojiImg(codepoint) {
 }
 
 function emojiToHtml(text) {
-  // Convert emoji chars to PNG <img> tags via numeric codepoint checks.
-  // Avoids regex character-class \u bugs by using raw number comparison.
   if (!text) return '';
   var result = '';
   for (var i = 0; i < text.length; i++) {
     var code = text.charCodeAt(i);
-    // Surrogate pair → supplementary plane codepoint
     if (code >= 0xD800 && code <= 0xDBFF && i + 1 < text.length) {
       var low = text.charCodeAt(i + 1);
       if (low >= 0xDC00 && low <= 0xDFFF) {
         var cp = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-        if (isEmojiCodepoint(cp)) {
-          result += emojiImg(cp);
-          i++;
-          continue;
-        }
+        if (isEmojiCodepoint(cp)) { result += emojiImg(cp); i++; continue; }
       }
     }
-    // Variation selectors, ZWJ, combining encloser — strip
-    if (code === 0xFE0F || code === 0xFE0E || code === 0x200D || code === 0x20E3) {
-      continue;
-    }
-    if (isEmojiCodepoint(code)) {
-      result += emojiImg(code);
-    } else {
-      result += escapeHtml(text[i]);
-    }
+    if (code === 0xFE0F || code === 0xFE0E || code === 0x200D || code === 0x20E3) continue;
+    if (isEmojiCodepoint(code)) { result += emojiImg(code); }
+    else { result += escapeHtml(text[i]); }
   }
   return result;
 }
@@ -222,11 +226,8 @@ function renderMarkdown(text) {
 }
 
 function renderText(text) {
-  // Renders text → emoji PNGs for emoji chars, clean HTML otherwise.
-  // Uses renderMarkdown first (escapes HTML), then emoji detection pass.
   if (!text) return '';
   var md = renderMarkdown(text);
-  // renderMarkdown already HTML-escaped — detect emoji chars in escaped text
   var result = '';
   for (var i = 0; i < md.length; i++) {
     var code = md.charCodeAt(i);
@@ -234,21 +235,12 @@ function renderText(text) {
       var low = md.charCodeAt(i + 1);
       if (low >= 0xDC00 && low <= 0xDFFF) {
         var cp = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-        if (isEmojiCodepoint(cp)) {
-          result += emojiImg(cp);
-          i++;
-          continue;
-        }
+        if (isEmojiCodepoint(cp)) { result += emojiImg(cp); i++; continue; }
       }
     }
-    if (code === 0xFE0F || code === 0xFE0E || code === 0x200D || code === 0x20E3) {
-      continue;
-    }
-    if (isEmojiCodepoint(code)) {
-      result += emojiImg(code);
-    } else {
-      result += md[i];
-    }
+    if (code === 0xFE0F || code === 0xFE0E || code === 0x200D || code === 0x20E3) continue;
+    if (isEmojiCodepoint(code)) { result += emojiImg(code); }
+    else { result += md[i]; }
   }
   return result;
 }
@@ -331,13 +323,7 @@ function showDetails(title, html) {
   detailsOverlay.classList.add('active');
 }
 
-selectCancel.addEventListener('click', function () { selectOverlay.classList.remove('active'); });
-detailsClose.addEventListener('click', function () { detailsOverlay.classList.remove('active'); });
-detailsOverlay.addEventListener('click', function (e) {
-  if (e.target === detailsOverlay) detailsOverlay.classList.remove('active');
-});
-
-// --- RENDER: STATUS ---
+// --- STATUS ---
 function setStatus(text, type) {
   statusBar.textContent = text;
   statusBar.className = 'status-bar' + (type ? ' ' + type : '');
@@ -349,105 +335,134 @@ function setConnected(connected) {
   statusDot.textContent = connected ? '\u25CF' : '\u25CB';
 }
 
-// --- RENDER: MESSAGES ---
-function renderMessages(data) {
-  if (!data || !data.messages) return;
+// --- MESSAGE INGESTION (data merge only, no rendering) ---
+function makeMsgKey(msg) {
+  // Unique key: combination of from node, packet sequence, text content
+  // Timestamp floored to 2s buckets to handle small timing variations
+  var bucket = Math.floor((msg.timestamp || 0) / 2);
+  return (msg.from || '') + '|' + bucket + '|' + (msg.text || '').substring(0, 40);
+}
+
+function ingestMessages(data) {
+  // Pure data ingestion — merge new messages into state, no rendering
+  if (!data || !data.messages || !data.messages.length) return 0;
 
   var newMessages = data.messages;
-  if (newMessages.length === 0) {
-    if (state.messages.length === 0) {
-      messageList.innerHTML = '<div class="empty-state">no messages yet</div>';
+  var added = 0;
+  var maxTs = state.lastMessageTs;
+
+  for (var i = 0; i < newMessages.length; i++) {
+    var msg = newMessages[i];
+    var ts = msg.timestamp || 0;
+    if (ts > maxTs) maxTs = ts;
+
+    var key = makeMsgKey(msg);
+    if (state.seenKeys[key]) continue;
+
+    state.seenKeys[key] = true;
+    state.messages.push(msg);
+    added++;
+  }
+
+  // Update lastMessageTs
+  if (maxTs > state.lastMessageTs) {
+    state.lastMessageTs = maxTs;
+    try { localStorage.setItem('mesh_since', String(maxTs)); } catch (e) {}
+  }
+
+  // Persist seen keys (keep last ~2000)
+  try {
+    var keys = Object.keys(state.seenKeys);
+    if (keys.length > 2000) {
+      var trimmed = {};
+      var recent = keys.slice(-2000);
+      for (var k = 0; k < recent.length; k++) trimmed[recent[k]] = true;
+      state.seenKeys = trimmed;
     }
-    return;
-  }
+    localStorage.setItem('mesh_seen', JSON.stringify(state.seenKeys));
+  } catch (e) {}
 
-  // Merge new messages, dedup by from+text+timestamp
-  var existing = {};
-  for (var i = 0; i < state.messages.length; i++) {
-    var em = state.messages[i];
-    var key = em.from + '|' + em.text + '|' + Math.floor((em.timestamp || 0) / 2);
-    existing[key] = true;
-  }
-
-  var added = false;
-  for (var j = 0; j < newMessages.length; j++) {
-    var nm = newMessages[j];
-    var nkey = nm.from + '|' + nm.text + '|' + Math.floor((nm.timestamp || 0) / 2);
-    if (!existing[nkey]) {
-      state.messages.push(nm);
-      existing[nkey] = true;
-      added = true;
-      if (nm.timestamp > state.lastMessageTs) state.lastMessageTs = nm.timestamp;
-    }
-  }
-
-  // Trim
+  // Trim message buffer
   if (state.messages.length > 200) {
     state.messages = state.messages.slice(-200);
   }
 
-  // Persist last msg ts
-  if (state.lastMessageTs > 0) {
-    localStorage.setItem('mesh_since', String(state.lastMessageTs));
-  }
+  return added;
+}
 
-  // Filter
-  var term = (msgSearch.value || '').toLowerCase();
-  var filtered = state.messages;
+// --- MESSAGE RENDERING (pure filter+render, no merge) ---
+function renderMessageList() {
+  // Pure render — filter state.messages by search term, render DOM
+  var term = (msgSearch && msgSearch.value ? msgSearch.value : '').toLowerCase();
+
+  // Start with all messages or apply filter
+  var filtered;
   if (term) {
     filtered = [];
-    for (var f = 0; f < state.messages.length; f++) {
-      var mf = state.messages[f];
-      var fromName = getNodeName(mf.from);
-      if (fromName.toLowerCase().indexOf(term) >= 0 ||
-          (mf.text || '').toLowerCase().indexOf(term) >= 0) {
-        filtered.push(mf);
+    for (var i = 0; i < state.messages.length; i++) {
+      var m = state.messages[i];
+      var fromName = getNodeName(m.from).toLowerCase();
+      var text = (m.text || '').toLowerCase();
+      if (fromName.indexOf(term) >= 0 || text.indexOf(term) >= 0) {
+        filtered.push(m);
       }
     }
+  } else {
+    filtered = state.messages;
   }
 
   if (filtered.length === 0) {
-    messageList.innerHTML = '<div class="empty-state">' + (term ? 'no matches' : 'no messages yet') + '</div>';
-  } else {
-    // Show last 60
-    var show = filtered.slice(-60);
-    var html = '';
-    for (var s = 0; s < show.length; s++) {
-      var m = show[s];
-      var fromName = getNodeName(m.from);
-      var time = formatTime(m.timestamp);
-      var cls = m.is_own ? 'msg-item own' : 'msg-item';
-      var tags = '';
-      if (m.to && m.to !== '!ffffffff' && m.to !== '!ffffffff' && m.to !== '!FFFFFFFF') tags += '<span class="meta-tag">DM</span>';
-      if (m.is_own) tags += '<span class="meta-tag">sent</span>';
-      if (m.via_mqtt) tags += '<span class="meta-tag">mqtt</span>';
-      else tags += '<span class="meta-tag">lora</span>';
-
-      var hops = '';
-      if (m.hops_taken !== undefined && m.hops_taken !== null) hops = ' ' + m.hops_taken + 'h';
-
-      html += '<div class="' + cls + '">' +
-        '<div class="msg-meta">' +
-        '<span class="meta-name">' + escapeHtml(fromName) + '</span>' +
-        '<span>ch' + (m.channel || 0) + '</span>' +
-        '<span>' + time + hops + '</span>' +
-        tags +
-        '</div>' +
-        '<div class="msg-text">' + renderText(m.text) + '</div>' +
-        '</div>';
-    }
-    messageList.innerHTML = html;
+    messageList.innerHTML = '<div class="empty-state">' +
+      (term ? 'no matches' : 'no messages yet') + '</div>';
+    return;
   }
+
+  // Show last 60
+  var show = filtered.slice(-60);
+  var html = '';
+  for (var s = 0; s < show.length; s++) {
+    var m = show[s];
+    var fromName = getNodeName(m.from);
+    var time = formatTime(m.timestamp);
+    var cls = m.is_own ? 'msg-item own' : 'msg-item';
+    var tags = '';
+    if (m.to && m.to !== '!ffffffff' && m.to !== '!FFFFFFFF') tags += '<span class="meta-tag">DM</span>';
+    if (m.is_own) tags += '<span class="meta-tag">sent</span>';
+    if (m.via_mqtt) tags += '<span class="meta-tag">mqtt</span>';
+    else tags += '<span class="meta-tag">lora</span>';
+
+    var hops = '';
+    if (m.hops_taken !== undefined && m.hops_taken !== null) hops = ' ' + m.hops_taken + 'h';
+
+    html += '<div class="' + cls + '" data-msgidx="' + s + '">' +
+      '<div class="msg-meta">' +
+      '<span class="meta-name">' + escapeHtml(fromName) + '</span>' +
+      '<span>ch' + (m.channel || 0) + '</span>' +
+      '<span>' + time + hops + '</span>' +
+      tags +
+      '</div>' +
+      '<div class="msg-text">' + renderText(m.text) + '</div>' +
+      '</div>';
+  }
+  messageList.innerHTML = html;
 
   // Auto-scroll
   messageList.scrollTop = messageList.scrollHeight;
 
-  // Wire long-press on messages
+  // Wire long-press
   var msgItems = messageList.querySelectorAll('.msg-item');
   wireLongPress(msgItems, function (idx) {
     var real = show[parseInt(idx, 10)];
     if (real) showMsgDetails(real);
   });
+}
+
+// Combined: ingest then render (used by poll path)
+function processMessages(data) {
+  var added = ingestMessages(data);
+  renderMessageList();
+  if (statMsgs) statMsgs.textContent = state.messages.length + ' msgs';
+  return added;
 }
 
 function showMsgDetails(msg) {
@@ -504,8 +519,9 @@ function renderNodes(data) {
   }
 
   // Apply filters
-  var filtered = state.nodes;
   var term = (nodeSearch.value || '').toLowerCase();
+  var filtered = state.nodes;
+
   if (term) {
     filtered = [];
     for (var k = 0; k < state.nodes.length; k++) {
@@ -546,7 +562,6 @@ function renderNodes(data) {
   for (var x = 0; x < filtered.length; x++) {
     var node = filtered[x];
     var name = node.long_name || node.short_name || node.id || '?';
-    var short = node.short_name || '';
     var ago = timeAgo(node.last_heard);
     var favCls = node.is_favorite ? ' fav' : '';
     var roleTag = node.role ? ' [' + node.role + ']' : '';
@@ -580,8 +595,7 @@ function renderNodes(data) {
         html += '<span class="node-tag">' + dist.toFixed(1) + 'km ' + brng + '</span>';
       }
     }
-    html += '</div>';
-    html += '</div>';
+    html += '</div></div>';
   }
 
   nodeList.innerHTML = html;
@@ -823,8 +837,6 @@ function clearDMTarget() {
   updateCtxBanner();
 }
 
-dmTargetEl.addEventListener('click', clearDMTarget);
-
 function updateCtxBanner() {
   var chName = 'ch' + config.channel;
   for (var i = 0; i < state.channels.length; i++) {
@@ -865,18 +877,20 @@ function pollAll() {
     }
   });
 
-  if (state.activeTab === 'messages') {
-    fetchMessages().then(function (data) {
-      if (data) {
-        renderMessages(data);
-        statMsgs.textContent = (data.count || state.messages.length) + ' msgs';
-      }
-    });
-    if (state.nodes.length === 0) fetchNodes().then(renderNodes);
-  } else if (state.activeTab === 'nodes') {
+  // Always fetch messages (for new ones arriving on background)
+  fetchMessages().then(processMessages);
+
+  // Fetch other data based on active tab
+  if (state.activeTab === 'nodes') {
     fetchNodes().then(renderNodes);
   } else if (state.activeTab === 'channels') {
     fetchChannels().then(renderChannels);
+  } else if (state.activeTab === 'settings') {
+    // Settings handled by status callback
+  } else {
+    // Messages tab — also fetch nodes/channels periodically for sidebar metadata
+    if (state.nodes.length === 0) fetchNodes().then(renderNodes);
+    if (state.channels.length === 0) fetchChannels().then(renderChannels);
   }
 }
 
@@ -906,18 +920,17 @@ function switchTab(tabName) {
 
   inputArea.style.display = (tabName === 'messages') ? '' : 'none';
 
-  if (tabName === 'messages') { updateCtxBanner(); fetchMessages().then(renderMessages); }
-  else if (tabName === 'nodes') fetchNodes().then(renderNodes);
-  else if (tabName === 'channels') fetchChannels().then(renderChannels);
-  else if (tabName === 'settings') pollAll();
-}
-
-// --- TAB CLICKS ---
-var tabButtons = document.querySelectorAll('.tab');
-for (var tb = 0; tb < tabButtons.length; tb++) {
-  (function (btn) {
-    btn.addEventListener('click', function () { switchTab(btn.getAttribute('data-tab')); });
-  })(tabButtons[tb]);
+  if (tabName === 'messages') {
+    updateCtxBanner();
+    // Fetch fresh messages from server, ingest, then render
+    fetchMessages().then(processMessages);
+  } else if (tabName === 'nodes') {
+    fetchNodes().then(renderNodes);
+  } else if (tabName === 'channels') {
+    fetchChannels().then(renderChannels);
+  } else if (tabName === 'settings') {
+    pollAll();
+  }
 }
 
 // --- SEND ---
@@ -934,76 +947,110 @@ function handleSend() {
   });
 }
 
-sendBtn.addEventListener('click', handleSend);
-inputField.addEventListener('keydown', function (e) {
-  if (e.key === 'Enter') { e.preventDefault(); handleSend(); }
-});
-
-// --- SORT / FILTER BUTTONS ---
-sortBtn.addEventListener('click', function () {
-  var idx = SORT_OPTIONS.findIndex(function (o) { return o.value === state.sortBy; });
-  idx = (idx + 1) % SORT_OPTIONS.length;
-  state.sortBy = SORT_OPTIONS[idx].value;
-  sortBtn.textContent = 'sort: ' + SORT_OPTIONS[idx].label;
-  fetchNodes().then(renderNodes);
-});
-
-roleBtn.addEventListener('click', function () {
-  var idx = ROLE_OPTIONS.findIndex(function (o) { return o.value === state.roleFilter; });
-  idx = (idx + 1) % ROLE_OPTIONS.length;
-  state.roleFilter = ROLE_OPTIONS[idx].value;
-  roleBtn.textContent = 'role: ' + ROLE_OPTIONS[idx].label;
-  if (state.roleFilter !== 'all') roleBtn.classList.add('on');
-  else roleBtn.classList.remove('on');
-  fetchNodes().then(renderNodes);
-});
-
-favOnlyBtn.addEventListener('click', function () {
-  state.favOnly = !state.favOnly;
-  if (state.favOnly) favOnlyBtn.classList.add('on');
-  else favOnlyBtn.classList.remove('on');
-  fetchNodes().then(renderNodes);
-});
-
-// --- SEARCH FILTERS ---
-msgSearch.addEventListener('input', function () {
-  renderMessages({ messages: state.messages });
-});
-
-nodeSearch.addEventListener('input', function () {
-  if (state.nodes.length) renderNodes({ nodes: state.nodes });
-});
-
-// --- SETTINGS EVENTS ---
-saveSettingsBtn.addEventListener('click', saveSettings);
-
-document.getElementById('rebootBtn').addEventListener('click', function () {
-  adminAction('reboot').then(function (r) {
-    adminInfo.textContent = r && r.ok ? 'rebooting...' : (r ? r.error : 'failed');
-  });
-});
-document.getElementById('shutdownBtn').addEventListener('click', function () {
-  adminAction('shutdown').then(function (r) {
-    adminInfo.textContent = r && r.ok ? 'shutting down...' : (r ? r.error : 'failed');
-  });
-});
-document.getElementById('resetNodesBtn').addEventListener('click', function () {
-  adminAction('reset-nodedb').then(function (r) {
-    adminInfo.textContent = r && r.ok ? 'nodedb reset' : (r ? r.error : 'failed');
-  });
-});
-document.getElementById('themeBtn').addEventListener('click', function () {
-  var current = document.body.getAttribute('data-theme');
-  if (current === 'dark') {
-    document.body.removeAttribute('data-theme');
-    localStorage.setItem('mesh_theme', 'light');
-  } else {
-    document.body.setAttribute('data-theme', 'dark');
-    localStorage.setItem('mesh_theme', 'dark');
-  }
-});
-
 // --- INIT ---
-loadSettings();
-startPolling();
-switchTab('messages');
+function init() {
+  initDomRefs();
+  loadSettings();
+
+  // Tab clicks
+  var tabButtons = document.querySelectorAll('.tab');
+  for (var tb = 0; tb < tabButtons.length; tb++) {
+    (function (btn) {
+      btn.addEventListener('click', function () { switchTab(btn.getAttribute('data-tab')); });
+    })(tabButtons[tb]);
+  }
+
+  // Send
+  sendBtn.addEventListener('click', handleSend);
+  inputField.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); handleSend(); }
+  });
+
+  // DM target click to clear
+  dmTargetEl.addEventListener('click', clearDMTarget);
+
+  // Sort/filter buttons
+  sortBtn.addEventListener('click', function () {
+    var idx = SORT_OPTIONS.findIndex(function (o) { return o.value === state.sortBy; });
+    idx = (idx + 1) % SORT_OPTIONS.length;
+    state.sortBy = SORT_OPTIONS[idx].value;
+    sortBtn.textContent = 'sort: ' + SORT_OPTIONS[idx].label;
+    renderNodes({ nodes: state.nodes });
+  });
+
+  roleBtn.addEventListener('click', function () {
+    var idx = ROLE_OPTIONS.findIndex(function (o) { return o.value === state.roleFilter; });
+    idx = (idx + 1) % ROLE_OPTIONS.length;
+    state.roleFilter = ROLE_OPTIONS[idx].value;
+    roleBtn.textContent = 'role: ' + ROLE_OPTIONS[idx].label;
+    if (state.roleFilter !== 'all') roleBtn.classList.add('on');
+    else roleBtn.classList.remove('on');
+    renderNodes({ nodes: state.nodes });
+  });
+
+  favOnlyBtn.addEventListener('click', function () {
+    state.favOnly = !state.favOnly;
+    if (state.favOnly) favOnlyBtn.classList.add('on');
+    else favOnlyBtn.classList.remove('on');
+    renderNodes({ nodes: state.nodes });
+  });
+
+  // Search filters (pure render, no fetch)
+  msgSearch.addEventListener('input', function () {
+    renderMessageList();
+  });
+
+  nodeSearch.addEventListener('input', function () {
+    if (state.nodes.length) renderNodes({ nodes: state.nodes });
+  });
+
+  // Settings
+  saveSettingsBtn.addEventListener('click', saveSettings);
+
+  document.getElementById('rebootBtn').addEventListener('click', function () {
+    adminAction('reboot').then(function (r) {
+      adminInfo.textContent = r && r.ok ? 'rebooting...' : (r ? r.error : 'failed');
+    });
+  });
+  document.getElementById('shutdownBtn').addEventListener('click', function () {
+    adminAction('shutdown').then(function (r) {
+      adminInfo.textContent = r && r.ok ? 'shutting down...' : (r ? r.error : 'failed');
+    });
+  });
+  document.getElementById('resetNodesBtn').addEventListener('click', function () {
+    adminAction('reset-nodedb').then(function (r) {
+      adminInfo.textContent = r && r.ok ? 'nodedb reset' : (r ? r.error : 'failed');
+    });
+  });
+  document.getElementById('themeBtn').addEventListener('click', function () {
+    var current = document.body.getAttribute('data-theme');
+    if (current === 'dark') {
+      document.body.removeAttribute('data-theme');
+      localStorage.setItem('mesh_theme', 'light');
+    } else {
+      document.body.setAttribute('data-theme', 'dark');
+      localStorage.setItem('mesh_theme', 'dark');
+    }
+  });
+
+  // Overlay closes
+  selectCancel.addEventListener('click', function () { selectOverlay.classList.remove('active'); });
+  detailsClose.addEventListener('click', function () { detailsOverlay.classList.remove('active'); });
+  detailsOverlay.addEventListener('click', function (e) {
+    if (e.target === detailsOverlay) detailsOverlay.classList.remove('active');
+  });
+
+  // Populate settings from state
+  if (channelInput) channelInput.value = config.channel;
+  if (pollInput) pollInput.value = config.pollInterval / 1000;
+
+  // Start polling
+  startPolling();
+}
+
+// Run on DOM ready
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
