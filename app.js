@@ -351,7 +351,10 @@ function ingestMessages(data) {
   for (var i = 0; i < newMessages.length; i++) {
     var msg = newMessages[i];
     var ts = msg.timestamp || 0;
-    if (ts > maxTs) maxTs = ts;
+    // Don't advance lastMessageTs for our own sent messages —
+    // they have timestamps after any received messages and would
+    // cause ?since= to skip older messages on next page load
+    if (!msg.is_own && ts > maxTs) maxTs = ts;
 
     var key = makeMsgKey(msg);
     if (state.seenKeys[key]) continue;

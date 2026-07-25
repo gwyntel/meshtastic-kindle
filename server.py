@@ -654,6 +654,31 @@ class MeshtasticProxyHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 _iface.sendText(text, channelIndex=channel)
 
+            # Save outgoing message to DB immediately — don't wait for loopback
+            device_node_num = None
+            try:
+                if _iface and hasattr(_iface, "getMyNodeInfo"):
+                    device_node_num = _iface.getMyNodeInfo().get("num")
+            except Exception:
+                pass
+
+            from_hex = "!%08x" % device_node_num if device_node_num else "!00000000"
+            msg = {
+                "from": from_hex,
+                "to": "!%08x" % dest_int if dest_int else "!ffffffff",
+                "channel": channel,
+                "text": text,
+                "timestamp": time.time(),
+                "via_mqtt": False,
+                "hops_taken": 0,
+                "snr": None,
+                "is_own": True,
+                "relay_node": None,
+                "packet_id": None,  # No packet_id for sent messages — prevents UNIQUE conflict
+            }
+            if _db:
+                save_message(_db, msg)
+
             self._send_json({"ok": True})
 
         except json.JSONDecodeError:
