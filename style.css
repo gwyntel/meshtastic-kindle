@@ -3,14 +3,6 @@
  * No animations, no flexbox gap, no gradients, no blur
  */
 
-/* --- NotoEmoji (monochrome, for e-ink) --- */
-@font-face {
-  font-family: 'NotoEmoji';
-  src: url('NotoEmoji.ttf') format('truetype');
-  font-weight: normal;
-  font-style: normal;
-}
-
 /* --- RESET --- */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 * { transition: none !important; animation: none !important; }
@@ -26,7 +18,6 @@
   --c-invert-fg: #ffffff;
   --ff-body: Georgia, "Times New Roman", Bookerly, serif;
   --ff-mono: "Courier New", Courier, monospace;
-  --ff-emoji: "NotoEmoji", var(--ff-body);
   --fs-xs: 11px;
   --fs-sm: 13px;
   --fs-md: 15px;
