@@ -169,26 +169,9 @@ function emojiImg(codepoint) {
 }
 
 function emojiToHtml(text) {
-  if (!text) return '';
-  var result = '';
-  for (var i = 0; i < text.length; i++) {
-    var code = text.charCodeAt(i);
-    if (code >= 0xD800 && code <= 0xDBFF && i + 1 < text.length) {
-      var low = text.charCodeAt(i + 1);
-      var cp = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-      result += emojiImg(cp);
-      i++;
-    } else if ((code >= 0x2600 && code <= 0x27BF) || (code >= 0x2B00 && code <= 0x2BFF) ||
-               (code >= 0x2300 && code <= 0x23FF) || (code >= 0x12000 && code <= 0x1247F) ||
-               (code >= 0x13000 && code <= 0x1342F)) {
-      result += emojiImg(code);
-    } else if (code === 0x20E3 || code === 0xFE0F || code === 0xFE0E || code === 0x200D) {
-      continue;
-    } else {
-      result += escapeHtml(text[i]);
-    }
-  }
-  return result;
+  // Kindle can't render emoji — just escape HTML and return clean text
+  // (The emoji→PNG pipeline adds complexity for zero benefit on e-ink)
+  return escapeHtml(text || '');
 }
 
 function renderMarkdown(text) {
@@ -205,22 +188,9 @@ function renderMarkdown(text) {
 
 function renderText(text) {
   if (!text) return '';
-  var html = renderMarkdown(text);
-  html = html.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, function (match) {
-    var cp = 0x10000 + ((match.charCodeAt(0) - 0xD800) << 10) + (match.charCodeAt(1) - 0xDC00);
-    return emojiImg(cp);
-  });
-  html = html.replace(/[\u2300-\u23FF\u2600-\u27BF\u2B00-\u2BFF\u12000-\u1247F\u13000-\u1342F]/g, function (match) {
-    var cp;
-    if (match.charCodeAt(0) >= 0xD800 && match.charCodeAt(0) <= 0xDBFF) {
-      cp = 0x10000 + ((match.charCodeAt(0) - 0xD800) << 10) + (match.charCodeAt(1) - 0xDC00);
-    } else {
-      cp = match.charCodeAt(0);
-    }
-    return emojiImg(cp);
-  });
-  html = html.replace(/[\uFE0F\uFE0E\u200D]/g, '');
-  return html;
+  // Kindle can't display emoji — just render clean text, no emoji→PNG pipeline
+  // Zero-width joiners and variation selectors stripped to avoid tofu
+  return renderMarkdown(text).replace(/[\uFE0F\uFE0E\u200D]/g, '');
 }
 
 function formatTime(timestamp) {
