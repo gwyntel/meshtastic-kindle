@@ -95,12 +95,13 @@ function initDomRefs() {
 // --- SETTINGS ---
 function loadSettings() {
   // Version check — clear stale localStorage if version changed
-  var VER = '5';
+  var VER = '6';
   var storedVer = localStorage.getItem('mesh_ver');
   if (storedVer !== VER) {
     localStorage.removeItem('mesh_since');
     localStorage.removeItem('mesh_seen');
     localStorage.removeItem('mesh_poll');
+    localStorage.removeItem('mesh_ch');
     localStorage.setItem('mesh_ver', VER);
   }
   var ch = localStorage.getItem('mesh_ch');
@@ -183,6 +184,26 @@ function escapeHtml(text) {
   var div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+// Strip emoji from text (for plain-text contexts like placeholders)
+function stripEmoji(text) {
+  if (!text) return '';
+  var result = '';
+  for (var i = 0; i < text.length; i++) {
+    var code = text.charCodeAt(i);
+    if (code >= 0xD800 && code <= 0xDBFF && i + 1 < text.length) {
+      var low = text.charCodeAt(i + 1);
+      if (low >= 0xDC00 && low <= 0xDFFF) {
+        var cp = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+        if (isEmojiCodepoint(cp)) { i++; continue; }
+      }
+    }
+    if (code === 0xFE0F || code === 0xFE0E || code === 0x200D || code === 0x20E3) continue;
+    if (isEmojiCodepoint(code)) continue;
+    result += text[i];
+  }
+  return result;
 }
 
 // Emoji detection — covers all PNG ranges in /emoji/
@@ -400,7 +421,7 @@ function renderMessageList() {
     filtered = [];
     for (var i = 0; i < state.messages.length; i++) {
       var m = state.messages[i];
-      var fromName = getNodeName(m.from).toLowerCase();
+      var fromName = stripEmoji(getNodeName(m.from)).toLowerCase();
       var text = (m.text || '').toLowerCase();
       if (fromName.indexOf(term) >= 0 || text.indexOf(term) >= 0) {
         filtered.push(m);
@@ -444,7 +465,7 @@ function renderMessageList() {
 
     html += '<div class="' + cls + '" data-msgidx="' + s + '">' +
       '<div class="msg-meta">' +
-      '<span class="meta-name">' + escapeHtml(fromName) + '</span>' +
+      '<span class="meta-name">' + renderText(fromName) + '</span>' +
       '<span>ch' + (m.channel || 0) + '</span>' +
       '<span>' + time + hops + '</span>' +
       tags +
@@ -479,9 +500,9 @@ function showMsgDetails(msg) {
   var senderNode = state.nodeCache[msg.from];
 
   var html = '<div class="info-grid">';
-  html += infoRow('from', fromName);
+  html += infoRow('from', renderText(fromName), true);
   html += infoRow('from id', msg.from || '--');
-  html += infoRow('to', toName);
+  html += infoRow('to', toName === 'broadcast' ? toName : renderText(toName), true);
   html += infoRow('to id', msg.to || 'broadcast');
   html += infoRow('channel', 'ch' + (msg.channel || 0));
   html += infoRow('time', formatTime(msg.timestamp));
@@ -696,9 +717,9 @@ function showNodeDetails(node) {
   });
 }
 
-function infoRow(label, value) {
+function infoRow(label, value, raw) {
   return '<div class="info-row"><span class="info-label">' + escapeHtml(label) +
-    '</span><span class="info-val">' + escapeHtml(String(value)) + '</span></div>';
+    '</span><span class="info-val">' + (raw ? value : escapeHtml(String(value))) + '</span></div>';
 }
 
 // --- LONG PRESS ---
@@ -831,8 +852,8 @@ function setDMTarget(nodeId) {
   if (state.dmTarget === nodeId) { clearDMTarget(); return; }
   state.dmTarget = nodeId;
   var name = getNodeName(nodeId);
-  inputField.placeholder = 'DM ' + name + '...';
-  dmTargetEl.textContent = 'to: ' + name + ' (tap to cancel)';
+  inputField.placeholder = 'DM ' + stripEmoji(name) + '...';
+  dmTargetEl.innerHTML = 'to: ' + renderText(name) + ' (tap to cancel)';
   dmTargetEl.className = 'dm-target active';
   updateCtxBanner();
 }
@@ -855,7 +876,7 @@ function updateCtxBanner() {
   }
   var html = '<span>channel: ' + escapeHtml(chName) + '</span>';
   if (state.dmTarget) {
-    html += '<span>DM: ' + escapeHtml(getNodeName(state.dmTarget)) + '</span>';
+    html += '<span>DM: ' + renderText(getNodeName(state.dmTarget)) + '</span>';
   }
   ctxBanner.innerHTML = html;
 }
