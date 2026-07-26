@@ -18,12 +18,19 @@ var state = {
   sortBy: 'name',
   roleFilter: 'all',
   favOnly: false,
+  // Pagination
+  nodePage: 0,
+  nodeTotal: 0,
+  msgOldestTs: null,  // oldest loaded message timestamp (for "load older")
+  msgLoading: false,
 };
 
 var config = {
   serverUrl: window.location.origin,
   channel: 0,
   pollInterval: 2000,
+  nodePageSize: 30,
+  msgPageSize: 50,
 };
 
 var SORT_OPTIONS = [
@@ -95,13 +102,15 @@ function initDomRefs() {
 // --- SETTINGS ---
 function loadSettings() {
   // Version check — clear stale localStorage if version changed
-  var VER = '6';
+  var VER = '8';
   var storedVer = localStorage.getItem('mesh_ver');
   if (storedVer !== VER) {
     localStorage.removeItem('mesh_since');
     localStorage.removeItem('mesh_seen');
     localStorage.removeItem('mesh_poll');
     localStorage.removeItem('mesh_ch');
+    localStorage.removeItem('mesh_node_page_size');
+    localStorage.removeItem('mesh_msg_page_size');
     localStorage.setItem('mesh_ver', VER);
   }
   var ch = localStorage.getItem('mesh_ch');
@@ -112,6 +121,10 @@ function loadSettings() {
   if (theme === 'dark') document.body.setAttribute('data-theme', 'dark');
   var since = localStorage.getItem('mesh_since');
   if (since !== null) state.lastMessageTs = parseFloat(since) || 0;
+  var nps = localStorage.getItem('mesh_node_page_size');
+  if (nps !== null) config.nodePageSize = parseInt(nps, 10) || 30;
+  var mps = localStorage.getItem('mesh_msg_page_size');
+  if (mps !== null) config.msgPageSize = parseInt(mps, 10) || 50;
   // seenKeys built fresh each session — don't persist across page loads
   // (lastMessageTs alone handles cross-session catch-up)
 }
@@ -125,6 +138,16 @@ function saveSettings() {
   if (isNaN(poll) || poll < 1) poll = 2; if (poll > 60) poll = 60;
   config.pollInterval = poll * 1000;
   localStorage.setItem('mesh_poll', poll);
+  // Page sizes
+  var nps = parseInt(document.getElementById('nodePageSizeInput').value, 10);
+  if (isNaN(nps) || nps < 5) nps = 30; if (nps > 200) nps = 200;
+  config.nodePageSize = nps;
+  localStorage.setItem('mesh_node_page_size', nps);
+  state.nodePage = 0;  // reset to first page
+  var mps = parseInt(document.getElementById('msgPageSizeInput').value, 10);
+  if (isNaN(mps) || mps < 10) mps = 50; if (mps > 200) mps = 200;
+  config.msgPageSize = mps;
+  localStorage.setItem('mesh_msg_page_size', mps);
   settingsInfo.textContent = 'saved';
   setTimeout(function () { settingsInfo.textContent = ''; }, 2000);
   restartPolling();
@@ -144,11 +167,19 @@ function fetchMessages() {
   // Always fetch recent + catch-up messages from server
   // Use lastMessageTs for catch-up; also get a small recent window for dedup refresh
   var since = state.lastMessageTs > 0 ? state.lastMessageTs : 0;
-  var url = config.serverUrl + '/api/messages?since=' + since;
+  var url = config.serverUrl + '/api/messages?since=' + since + '&limit=' + config.msgPageSize;
   return fetchJSON(url);
 }
 
-function fetchNodes() { return fetchJSON(config.serverUrl + '/api/nodes'); }
+function fetchOlderMessages(beforeTs) {
+  return fetchJSON(config.serverUrl + '/api/messages?before=' + beforeTs + '&limit=' + config.msgPageSize);
+}
+
+function fetchNodes(page) {
+  page = (page !== undefined ? page : state.nodePage);
+  var offset = page * config.nodePageSize;
+  return fetchJSON(config.serverUrl + '/api/nodes?limit=' + config.nodePageSize + '&offset=' + offset);
+}
 function fetchChannels() { return fetchJSON(config.serverUrl + '/api/channels'); }
 
 function sendMessage(text, destNode) {
@@ -402,10 +433,28 @@ function ingestMessages(data) {
 
   // seenKeys is session-only — no persistence needed
 
-  // Trim message buffer
-  if (state.messages.length > 200) {
-    state.messages = state.messages.slice(-200);
+  // Track oldest loaded message for backward pagination
+  if (state.messages.length > 0 && state.messages[0].timestamp > 0) {
+    state.msgOldestTs = state.messages[0].timestamp;
   }
+
+  // Trim message buffer to 2x page size — keeps scrollback available
+  // without unbounded growth. At default 50 msg page size, holds 100.
+  var maxMsgs = config.msgPageSize * 2;
+  if (state.messages.length > maxMsgs) {
+    state.messages = state.messages.slice(-maxMsgs);
+    // Recompute oldest after trim
+    if (state.messages.length > 0) {
+      state.msgOldestTs = state.messages[0].timestamp;
+    }
+  }
+
+  // Prune seenKeys — keep only keys for messages still in the buffer
+  var keepKeys = {};
+  for (var ki = 0; ki < state.messages.length; ki++) {
+    keepKeys[makeMsgKey(state.messages[ki])] = true;
+  }
+  state.seenKeys = keepKeys;
 
   return added;
 }
@@ -440,15 +489,30 @@ function renderMessageList() {
     filtered = chFiltered;
   }
 
-  if (filtered.length === 0) {
+  // Show last N messages (where N = msgPageSize, default 50)
+  var show = filtered.slice(-config.msgPageSize);
+
+  if (show.length === 0) {
     messageList.innerHTML = '<div class="empty-state">' +
       (term ? 'no matches' : 'no messages yet') + '</div>';
     return;
   }
 
-  // Show last 60
-  var show = filtered.slice(-60);
   var html = '';
+
+  // "Load older" button at top — only show when:
+  // 1. Not searching (search filters the full set, not server-side)
+  // 2. We have older messages available in state
+  var hasOlder = !term && filtered.length >= config.msgPageSize &&
+    state.messages.length > 0 && state.messages[0].timestamp > 0 &&
+    state.msgOldestTs !== null;
+  if (hasOlder && !state.msgLoading) {
+    html += '<div class="page-nav"><button class="btn btn-mini" id="loadOlderBtn">&#9650; older messages</button></div>';
+  } else if (hasOlder && state.msgLoading) {
+    html += '<div class="page-nav"><span class="page-nav-info">loading...</span></div>';
+  }
+
+  var offset = state.messages.length - show.length;
   for (var s = 0; s < show.length; s++) {
     var m = show[s];
     var fromName = getNodeName(m.from);
@@ -463,7 +527,7 @@ function renderMessageList() {
     var hops = '';
     if (m.hops_taken !== undefined && m.hops_taken !== null) hops = ' ' + m.hops_taken + 'h';
 
-    html += '<div class="' + cls + '" data-msgidx="' + s + '">' +
+    html += '<div class="' + cls + '" data-msgidx="' + (offset + s) + '">' +
       '<div class="msg-meta">' +
       '<span class="meta-name">' + renderText(fromName) + '</span>' +
       '<span>ch' + (m.channel || 0) + '</span>' +
@@ -475,8 +539,41 @@ function renderMessageList() {
   }
   messageList.innerHTML = html;
 
-  // Auto-scroll
+  // Auto-scroll to bottom (new messages arrive at the end)
   messageList.scrollTop = messageList.scrollHeight;
+
+  // Wire load-older button
+  var olderBtn = document.getElementById('loadOlderBtn');
+  if (olderBtn) {
+    olderBtn.addEventListener('click', function () {
+      if (state.msgLoading) return;
+      state.msgLoading = true;
+      renderMessageList();
+      fetchOlderMessages(state.msgOldestTs).then(function (data) {
+        state.msgLoading = false;
+        if (data && data.messages && data.messages.length > 0) {
+          // Track new oldest timestamp
+          if (data.messages.length > 0) {
+            state.msgOldestTs = data.messages[0].timestamp;
+          }
+          // Prepend to message list (oldest first, so prepend in reverse)
+          for (var oi = data.messages.length - 1; oi >= 0; oi--) {
+            var oldMsg = data.messages[oi];
+            var okey = makeMsgKey(oldMsg);
+            if (!state.seenKeys[okey]) {
+              state.seenKeys[okey] = true;
+              state.messages.unshift(oldMsg);
+            }
+          }
+        }
+        renderMessageList();
+        // Scroll to where old content starts — approximate by scroll height diff
+        if (messageList.lastElementChild) {
+          messageList.lastElementChild.scrollIntoView(false);
+        }
+      });
+    });
+  }
 
   // Wire long-press
   var msgItems = messageList.querySelectorAll('.msg-item');
@@ -529,10 +626,22 @@ function showMsgDetails(msg) {
 // --- RENDER: NODES ---
 function renderNodes(data) {
   if (!data || !data.nodes) return;
-  state.nodes = data.nodes;
 
-  // Build node cache
+  // If the API returned paginated results, use total from response.
+  // Otherwise fall back to length of returned nodes (full list).
+  state.nodes = data.nodes;
+  state.nodeTotal = data.total || data.nodes.length;
+
+  // Build node cache from ALL nodes the server knows — we get this
+  // from the status endpoint which sends node_count, but for the cache
+  // we only have the current page's nodes. For DM targeting we need the
+  // full cache, so keep old entries + merge new page.
   var cache = {};
+  // Preserve existing cache entries first
+  if (state.nodeCache) {
+    for (var ck in state.nodeCache) { cache[ck] = state.nodeCache[ck]; }
+  }
+  // Overlay current page data
   for (var i = 0; i < state.nodes.length; i++) {
     cache[state.nodes[i].id] = state.nodes[i];
   }
@@ -547,7 +656,7 @@ function renderNodes(data) {
     }
   }
 
-  // Apply filters
+  // Apply filters to the CURRENT PAGE's nodes
   var term = (nodeSearch.value || '').toLowerCase();
   var filtered = state.nodes;
 
@@ -582,12 +691,26 @@ function renderNodes(data) {
     return 0;
   });
 
+  var totalPages = Math.max(1, Math.ceil(state.nodeTotal / config.nodePageSize));
+
   if (filtered.length === 0) {
-    nodeList.innerHTML = '<div class="empty-state">' + (term ? 'no matches' : 'no nodes discovered') + '</div>';
+    var emptyHtml = '<div class="empty-state">' + (term ? 'no matches' : 'no nodes discovered') + '</div>';
+    // Still show pagination if there are pages
+    if (totalPages > 1) {
+      emptyHtml += buildPageNav(state.nodePage, totalPages);
+    }
+    nodeList.innerHTML = emptyHtml;
+    wirePageNav();
     return;
   }
 
   var html = '';
+
+  // Page navigation header
+  if (totalPages > 1) {
+    html += buildPageNav(state.nodePage, totalPages);
+  }
+
   for (var x = 0; x < filtered.length; x++) {
     var node = filtered[x];
     var name = node.long_name || node.short_name || node.id || '?';
@@ -627,6 +750,11 @@ function renderNodes(data) {
     html += '</div></div>';
   }
 
+  // Page navigation footer
+  if (totalPages > 1) {
+    html += buildPageNav(state.nodePage, totalPages);
+  }
+
   nodeList.innerHTML = html;
 
   // Wire long-press
@@ -635,6 +763,49 @@ function renderNodes(data) {
     var nd = state.nodeCache[nodeId];
     if (nd) showNodeDetails(nd);
   });
+
+  // Wire page nav buttons
+  wirePageNav();
+}
+
+function buildPageNav(currentPage, totalPages) {
+  var html = '<div class="page-nav">';
+  if (currentPage > 0) {
+    html += '<button class="btn btn-mini page-prev" data-page="' + (currentPage - 1) + '">&#9664; prev</button>';
+  } else {
+    html += '<span class="page-nav-spacer"></span>';
+  }
+  html += '<span class="page-nav-info">page ' + (currentPage + 1) + ' / ' + totalPages + '</span>';
+  if (currentPage + 1 < totalPages) {
+    html += '<button class="btn btn-mini page-next" data-page="' + (currentPage + 1) + '">next &#9654;</button>';
+  } else {
+    html += '<span class="page-nav-spacer"></span>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function wirePageNav() {
+  var prevBtns = nodeList.querySelectorAll('.page-prev');
+  for (var p = 0; p < prevBtns.length; p++) {
+    (function(btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        state.nodePage = parseInt(btn.getAttribute('data-page'), 10);
+        fetchNodes().then(renderNodes);
+      });
+    })(prevBtns[p]);
+  }
+  var nextBtns = nodeList.querySelectorAll('.page-next');
+  for (var n = 0; n < nextBtns.length; n++) {
+    (function(btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        state.nodePage = parseInt(btn.getAttribute('data-page'), 10);
+        fetchNodes().then(renderNodes);
+      });
+    })(nextBtns[n]);
+  }
 }
 
 function formatUptime(seconds) {
@@ -911,7 +1082,7 @@ function pollAll() {
 
   // Fetch other data based on active tab
   if (state.activeTab === 'nodes') {
-    fetchNodes().then(renderNodes);
+    fetchNodes(state.nodePage).then(renderNodes);
   } else if (state.activeTab === 'channels') {
     fetchChannels().then(renderChannels);
   } else if (state.activeTab === 'settings') {
@@ -954,7 +1125,7 @@ function switchTab(tabName) {
     // Fetch fresh messages from server, ingest, then render
     fetchMessages().then(processMessages);
   } else if (tabName === 'nodes') {
-    fetchNodes().then(renderNodes);
+    fetchNodes(state.nodePage).then(renderNodes);
   } else if (tabName === 'channels') {
     fetchChannels().then(renderChannels);
   } else if (tabName === 'settings') {
@@ -969,10 +1140,16 @@ function handleSend() {
   sendBtn.disabled = true;
   sendBtn.textContent = '...';
   sendMessage(text, state.dmTarget).then(function (result) {
-    sendBtn.disabled = false;
-    sendBtn.textContent = 'send';
-    if (result && result.ok) { inputField.value = ''; pollAll(); }
-    else { setStatus('send error: ' + ((result && result.error) ? result.error : 'failed'), 'error'); }
+    if (result && result.ok) {
+      inputField.value = '';
+      sendBtn.textContent = '\u2713';  // check mark
+      setTimeout(function () { sendBtn.disabled = false; sendBtn.textContent = 'send'; }, 800);
+      pollAll();
+    } else {
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'send';
+      setStatus('send error: ' + ((result && result.error) ? result.error : 'failed'), 'error');
+    }
   });
 }
 
@@ -1072,6 +1249,8 @@ function init() {
   // Populate settings from state
   if (channelInput) channelInput.value = config.channel;
   if (pollInput) pollInput.value = config.pollInterval / 1000;
+  if (document.getElementById('nodePageSizeInput')) document.getElementById('nodePageSizeInput').value = config.nodePageSize;
+  if (document.getElementById('msgPageSizeInput')) document.getElementById('msgPageSizeInput').value = config.msgPageSize;
 
   // Start polling
   startPolling();

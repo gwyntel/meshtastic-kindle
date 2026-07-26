@@ -18,7 +18,7 @@
   --c-invert-fg: #ffffff;
   --ff-body: Georgia, "Times New Roman", Bookerly, serif;
   --ff-mono: "Courier New", Courier, monospace;
-  --fs-xs: 11px;
+  --fs-xs: 12px;
   --fs-sm: 13px;
   --fs-md: 15px;
   --fs-lg: 17px;
@@ -153,6 +153,7 @@ html, body {
   -webkit-appearance: none; appearance: none;
 }
 .search-input:focus { outline: none; border-width: 2px; padding: 6px 9px; }
+.search-input::-webkit-input-placeholder { color: var(--c-subtle); }
 
 /* --- CHIPS --- */
 .chip {
@@ -261,7 +262,7 @@ html, body {
 .node-tags > * + * { margin-left: 6px; }
 .node-tag {
   font-family: var(--ff-mono);
-  font-size: 10px; padding: 0 4px;
+  font-size: var(--fs-xs); padding: 1px 5px;
   border: 1px solid var(--c-border);
   color: var(--c-subtle);
 }
@@ -385,8 +386,8 @@ html, body {
   font-size: var(--fs-md);
 }
 .btn-mini {
-  font-size: var(--fs-xs); padding: 4px 10px;
-  min-height: 30px; min-width: 40px;
+  font-size: var(--fs-xs); padding: 6px 12px;
+  min-height: 40px; min-width: 48px;
 }
 
 /* --- INPUT AREA --- */
@@ -494,6 +495,24 @@ html, body {
 }
 .md-strike { text-decoration: line-through; }
 .md-link { text-decoration: underline; color: var(--c-fg); }
+
+/* --- PAGE NAVIGATION --- */
+.page-nav {
+  display: flex; flex-direction: row;
+  align-items: center; justify-content: center;
+  padding: 8px 14px;
+  gap: 0;
+}
+.page-nav > * + * { margin-left: 10px; }
+.page-nav-info {
+  font-family: var(--ff-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-subtle);
+}
+.page-nav-spacer {
+  width: 48px;
+  display: inline-block;
+}
 
 /* --- EMOJI IMAGES --- */
 .emoji-img {

@@ -25,6 +25,29 @@ except ImportError:
     print("[!] Install: pip install meshtastic", file=sys.stderr)
     sys.exit(1)
 
+# --- MONKEY-PATCH: Firmware 2.7+ compatibility for node_info "num"→"id" ---
+# Newer Meshtastic firmware sends "id" ("!c1fc9198") in nodeInfo instead of "num" (int).
+# This patches the protobuf→dict conversion so the meshtastic library always sees "num".
+# Lives here (not in the library) so it survives `pip install --upgrade meshtastic`.
+import google.protobuf.json_format as _pb_json
+_real_msg_to_dict = _pb_json.MessageToDict
+
+def _patched_msg_to_dict(message, **kwargs):
+    d = _real_msg_to_dict(message, **kwargs)
+    ni = d.get("nodeInfo")
+    if ni and "num" not in ni:
+        # Firmware 2.7+: "num" field removed from nodeInfo protobuf.
+        # Reconstruct from user.id ("!c1fc9198" → 3254555032).
+        userId = ni.get("user", {}).get("id", "")
+        if userId and isinstance(userId, str) and userId.startswith("!"):
+            try:
+                ni["num"] = int(userId[1:], 16)
+            except ValueError:
+                pass
+    return d
+
+_pb_json.MessageToDict = _patched_msg_to_dict
+
 # --- CONFIG ---
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8645
 DEVICE_URL = os.environ.get("MESHTASTIC_URL", "http://meshtastic.local")
@@ -129,6 +152,31 @@ def get_messages_since(db, since_ts, limit=100):
             "snr": row[7], "is_own": bool(row[8]),
             "relay_node": row[9], "packet_id": row[10],
         })
+    return messages
+
+
+def get_messages_before(db, before_ts, limit=100):
+    """Get messages OLDER than before_ts (backward pagination)."""
+    rows = db.execute("""
+        SELECT msg_from, msg_to, channel, text, timestamp, via_mqtt,
+               hops_taken, snr, is_own, relay_node, packet_id
+        FROM messages
+        WHERE timestamp < ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+    """, (before_ts, limit)).fetchall()
+
+    messages = []
+    for row in rows:
+        messages.append({
+            "from": row[0], "to": row[1], "channel": row[2],
+            "text": row[3], "timestamp": row[4],
+            "via_mqtt": bool(row[5]), "hops_taken": row[6],
+            "snr": row[7], "is_own": bool(row[8]),
+            "relay_node": row[9], "packet_id": row[10],
+        })
+    # Return ascending so frontend appends in order
+    messages.reverse()
     return messages
 
 
@@ -572,25 +620,59 @@ class MeshtasticProxyHandler(http.server.SimpleHTTPRequestHandler):
 
         elif parsed.path == "/api/nodes":
             with state_lock:
-                nodes = list(state["nodes"].values())
-            nodes.sort(key=lambda n: (
+                all_nodes = list(state["nodes"].values())
+            all_nodes.sort(key=lambda n: (
                 n.get("long_name", "") == "",
                 -(n.get("last_heard", 0) or 0),
             ))
-            self._send_json({"nodes": nodes})
+            # Pagination params
+            try:
+                node_limit = min(max(int(qs.get("limit", [0])[0]), 0), 500)
+            except (ValueError, IndexError):
+                node_limit = 0
+            try:
+                node_offset = max(int(qs.get("offset", [0])[0]), 0)
+            except (ValueError, IndexError):
+                node_offset = 0
+
+            if node_limit > 0:
+                nodes = all_nodes[node_offset:node_offset + node_limit]
+            else:
+                nodes = all_nodes
+
+            self._send_json({
+                "nodes": nodes,
+                "total": len(all_nodes),
+                "offset": node_offset,
+                "limit": node_limit or len(all_nodes),
+            })
 
         elif parsed.path == "/api/messages":
+            # Forward pagination: ?since=<ts>&limit=<n>
+            # Backward pagination: ?before=<ts>&limit=<n>
             since = None
+            before = None
+            try:
+                msg_limit = min(max(int(qs.get("limit", [200])[0]), 1), 500)
+            except (ValueError, IndexError):
+                msg_limit = 200
             if "since" in qs:
                 try:
                     since = float(qs["since"][0])
                 except (ValueError, IndexError):
                     pass
+            if "before" in qs:
+                try:
+                    before = float(qs["before"][0])
+                except (ValueError, IndexError):
+                    pass
 
-            if _db and since is not None:
-                messages = get_messages_since(_db, since, limit=200)
+            if _db and before is not None:
+                messages = get_messages_before(_db, before, limit=msg_limit)
+            elif _db and since is not None:
+                messages = get_messages_since(_db, since, limit=msg_limit)
             elif _db:
-                messages = get_messages_since(_db, 0, limit=200)
+                messages = get_messages_since(_db, 0, limit=msg_limit)
             else:
                 messages = []
 

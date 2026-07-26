@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 emoji/
 node_modules/
+mesh.db-shm
+mesh.db-wal

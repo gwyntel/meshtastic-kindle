@@ -4,10 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#ffffff">
-  <link rel="manifest" href="manifest.json?v=6">
+  <link rel="manifest" href="manifest.json?v=8">
   <title>mesh</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📡</text></svg>">
-  <link rel="stylesheet" href="style.css?v=6">
+  <link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
 <div class="app" id="app">
@@ -114,6 +114,18 @@
       </div>
 
       <div class="settings-section">
+        <div class="section-head">paging</div>
+        <div class="settings-row">
+          <label class="settings-label">nodes/page</label>
+          <input type="number" class="settings-input" id="nodePageSizeInput" value="30" min="5" max="200">
+        </div>
+        <div class="settings-row">
+          <label class="settings-label">msgs/page</label>
+          <input type="number" class="settings-input" id="msgPageSizeInput" value="50" min="10" max="200">
+        </div>
+      </div>
+
+      <div class="settings-section">
         <div class="section-head">display</div>
         <div class="admin-actions">
           <button class="btn" id="themeBtn">invert</button>
@@ -158,6 +170,6 @@
   </div>
 </div>
 
-<script src="app.js?v=6"></script>
+<script src="app.js?v=8"></script>
 </body>
 </html>
