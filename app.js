@@ -94,6 +94,15 @@ function initDomRefs() {
 
 // --- SETTINGS ---
 function loadSettings() {
+  // Version check — clear stale localStorage if version changed
+  var VER = '5';
+  var storedVer = localStorage.getItem('mesh_ver');
+  if (storedVer !== VER) {
+    localStorage.removeItem('mesh_since');
+    localStorage.removeItem('mesh_seen');
+    localStorage.removeItem('mesh_poll');
+    localStorage.setItem('mesh_ver', VER);
+  }
   var ch = localStorage.getItem('mesh_ch');
   if (ch !== null) { config.channel = parseInt(ch, 10) || 0; if (channelInput) channelInput.value = config.channel; }
   var poll = localStorage.getItem('mesh_poll');
@@ -176,13 +185,13 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-// Emoji detection — numeric comparison
+// Emoji detection — covers all PNG ranges in /emoji/
 function isEmojiCodepoint(cp) {
-  return (cp >= 0x2300 && cp <= 0x23FF)   // Misc Technical
-      || (cp >= 0x2600 && cp <= 0x27BF)   // Misc Symbols, Dingbats
-      || (cp >= 0x2B00 && cp <= 0x2BFF)   // Misc Symbols and Arrows
-      || (cp >= 0x12000 && cp <= 0x1247F) // Cuneiform
-      || (cp >= 0x13000 && cp <= 0x1342F); // Egyptian Hieroglyphs
+  return (cp >= 0x2300 && cp <= 0x23FF)     // Misc Technical
+      || (cp >= 0x2600 && cp <= 0x27BF)     // Misc Symbols, Dingbats
+      || (cp >= 0x2B00 && cp <= 0x2BFF)     // Misc Symbols and Arrows
+      || (cp >= 0x12000 && cp <= 0x1247F)   // Cuneiform (1,152 PNGs in /emoji/)
+      || (cp >= 0x1F000 && cp <= 0x1FBFF);  // Emoticons, Transport, Symbols (3,071 PNGs)
 }
 
 function emojiImg(codepoint) {
@@ -399,6 +408,15 @@ function renderMessageList() {
     }
   } else {
     filtered = state.messages;
+  }
+
+  // Filter by channel (unless 'all' mode: config.channel < 0)
+  if (config.channel >= 0) {
+    var chFiltered = [];
+    for (var c = 0; c < filtered.length; c++) {
+      if (filtered[c].channel === config.channel) chFiltered.push(filtered[c]);
+    }
+    filtered = chFiltered;
   }
 
   if (filtered.length === 0) {
