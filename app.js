@@ -107,7 +107,7 @@ function initDomRefs() {
 // --- SETTINGS ---
 function loadSettings() {
   // Version check — clear stale localStorage if version changed
-  var VER = '10';
+  var VER = '11';
   var storedVer = localStorage.getItem('mesh_ver');
   if (storedVer !== VER) {
     localStorage.removeItem('mesh_since');
@@ -660,7 +660,7 @@ function renderMessageList() {
   // Wire long-press
   var msgItems = messageList.querySelectorAll('.msg-item');
   wireLongPress(msgItems, function (idx) {
-    var real = show[parseInt(idx, 10)];
+    var real = state.messages[parseInt(idx, 10)];
     if (real) showMsgDetails(real);
   });
 }
@@ -830,6 +830,11 @@ function renderNodes(data) {
 
     html += '<div class="node-row' + favCls + '" data-nodeid="' + escapeHtml(node.id) + '">';
     html += '<span class="node-name">' + emojiToHtml(displayName) + '</span>';
+    // Favorite star badge
+    if (node.is_favorite) {
+      html += '<span class="name-badge" style="background:transparent;font-size:14px;">' +
+        emojiImg(0x2B50) + '</span>';
+    }
     // Short name badge (only if different from display name)
     if (node.short_name && node.long_name && node.short_name !== node.long_name) {
       html += '<span class="name-badge">' + escapeHtml(node.short_name) + '</span>';
@@ -842,8 +847,11 @@ function renderNodes(data) {
     if (node.role) html += '<span class="node-tag">' + escapeHtml(node.role) + '</span>';
     if (node.telemetry) {
       var t = node.telemetry;
-      if (t.battery !== undefined && t.battery !== null)
-        html += '<span class="node-tag' + (t.battery < 10 ? ' warn' : '') + '">bat ' + t.battery + '%</span>';
+      if (t.battery !== undefined && t.battery !== null) {
+        var batTag = 'bat ' + t.battery + '%';
+        if (t.battery >= 100) batTag += ' ' + emojiImg(0x1F50C);
+        html += '<span class="node-tag' + (t.battery < 10 ? ' warn' : '') + '">' + batTag + '</span>';
+      }
       if (t.temp !== undefined && t.temp !== null)
         html += '<span class="node-tag">' + formatTemp(t.temp) + '</span>';
       if (t.voltage !== undefined && t.voltage !== null)
@@ -1166,6 +1174,11 @@ function updateCtxBanner() {
 
 // --- POLLING ---
 function pollAll() {
+  // Blink status dot on each poll cycle
+  if (statusDot && state.connected) {
+    statusDot.textContent = '\u25CB';
+    setTimeout(function () { if (state.connected) statusDot.textContent = '\u25CF'; }, 400);
+  }
   fetchStatus().then(function (status) {
     if (status) {
       setConnected(status.connected);
