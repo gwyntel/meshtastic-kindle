@@ -107,7 +107,7 @@ function initDomRefs() {
 // --- SETTINGS ---
 function loadSettings() {
   // Version check — clear stale localStorage if version changed
-  var VER = '9';
+  var VER = '10';
   var storedVer = localStorage.getItem('mesh_ver');
   if (storedVer !== VER) {
     localStorage.removeItem('mesh_since');
@@ -264,6 +264,8 @@ function emojiImg(codepoint) {
 
 function emojiToHtml(text) {
   if (!text) return '';
+  // Convert BEL glyph to bell emoji
+  text = text.replace(/\x07/g, String.fromCodePoint(0x1F514));
   var result = '';
   for (var i = 0; i < text.length; i++) {
     var code = text.charCodeAt(i);
@@ -295,7 +297,9 @@ function renderMarkdown(text) {
 
 function renderText(text) {
   if (!text) return '';
-  var md = renderMarkdown(text);
+  // Convert BEL glyph (U+0007 / \x07) to bell emoji
+  var processed = text.replace(/\x07/g, String.fromCodePoint(0x1F514));
+  var md = renderMarkdown(processed);
   var result = '';
   for (var i = 0; i < md.length; i++) {
     var code = md.charCodeAt(i);
@@ -555,6 +559,16 @@ function renderMessageList() {
       if (filtered[c].channel === config.channel) chFiltered.push(filtered[c]);
     }
     filtered = chFiltered;
+  }
+
+  // Filter by DM target (only show messages to/from that node)
+  if (state.dmTarget) {
+    var dmFiltered = [];
+    for (var d = 0; d < filtered.length; d++) {
+      var dm = filtered[d];
+      if (dm.from === state.dmTarget || dm.to === state.dmTarget) dmFiltered.push(dm);
+    }
+    filtered = dmFiltered;
   }
 
   // Show last N messages (where N = msgPageSize, default 50)
@@ -1136,6 +1150,7 @@ function clearDMTarget() {
   dmTargetEl.textContent = '';
   dmTargetEl.className = 'dm-target';
   updateCtxBanner();
+  renderMessageList();
 }
 
 function updateCtxBanner() {
@@ -1146,11 +1161,7 @@ function updateCtxBanner() {
       break;
     }
   }
-  var html = '<span>channel: ' + escapeHtml(chName) + '</span>';
-  if (state.dmTarget) {
-    html += '<span>DM: ' + renderText(getNodeName(state.dmTarget)) + '</span>';
-  }
-  ctxBanner.innerHTML = html;
+  ctxBanner.innerHTML = '<span>channel: ' + escapeHtml(chName) + '</span>';
 }
 
 // --- POLLING ---
