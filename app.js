@@ -31,6 +31,7 @@ var config = {
   pollInterval: 2000,
   nodePageSize: 30,
   msgPageSize: 50,
+  units: 'metric',
 };
 
 var SORT_OPTIONS = [
@@ -60,6 +61,7 @@ var deviceUrlInput, channelInput, pollInput, saveSettingsBtn, settingsInfo;
 var adminInfo, deviceInfoGrid, netStatsGrid, channelUrlBox;
 var selectOverlay, selectTitle, selectOptions, selectCancel;
 var detailsOverlay, detailsTitle, detailsContent, detailsClose;
+var emojiBtn, emojiKeyboard, unitsBtn;
 
 function initDomRefs() {
   messageList = document.getElementById('messageList');
@@ -97,12 +99,15 @@ function initDomRefs() {
   detailsTitle = document.getElementById('detailsTitle');
   detailsContent = document.getElementById('detailsContent');
   detailsClose = document.getElementById('detailsClose');
+  emojiBtn = document.getElementById('emojiBtn');
+  emojiKeyboard = document.getElementById('emojiKeyboard');
+  unitsBtn = document.getElementById('unitsBtn');
 }
 
 // --- SETTINGS ---
 function loadSettings() {
   // Version check — clear stale localStorage if version changed
-  var VER = '8';
+  var VER = '9';
   var storedVer = localStorage.getItem('mesh_ver');
   if (storedVer !== VER) {
     localStorage.removeItem('mesh_since');
@@ -111,6 +116,7 @@ function loadSettings() {
     localStorage.removeItem('mesh_ch');
     localStorage.removeItem('mesh_node_page_size');
     localStorage.removeItem('mesh_msg_page_size');
+    localStorage.removeItem('mesh_units');
     localStorage.setItem('mesh_ver', VER);
   }
   var ch = localStorage.getItem('mesh_ch');
@@ -125,6 +131,8 @@ function loadSettings() {
   if (nps !== null) config.nodePageSize = parseInt(nps, 10) || 30;
   var mps = localStorage.getItem('mesh_msg_page_size');
   if (mps !== null) config.msgPageSize = parseInt(mps, 10) || 50;
+  var units = localStorage.getItem('mesh_units');
+  if (units === 'imperial') { config.units = 'imperial'; if (unitsBtn) unitsBtn.textContent = 'imperial'; }
   // seenKeys built fresh each session — don't persist across page loads
   // (lastMessageTs alone handles cross-session catch-up)
 }
@@ -148,6 +156,8 @@ function saveSettings() {
   if (isNaN(mps) || mps < 10) mps = 50; if (mps > 200) mps = 200;
   config.msgPageSize = mps;
   localStorage.setItem('mesh_msg_page_size', mps);
+  // Units
+  localStorage.setItem('mesh_units', config.units);
   settingsInfo.textContent = 'saved';
   setTimeout(function () { settingsInfo.textContent = ''; }, 2000);
   restartPolling();
@@ -343,6 +353,24 @@ function bearing(lat1, lon1, lat2, lon2) {
   return dirs[Math.round(brng / 45) % 8];
 }
 
+// --- UNITS ---
+function isImperial() { return config.units === 'imperial'; }
+function formatTemp(celsius) {
+  if (celsius === undefined || celsius === null) return '';
+  if (isImperial()) return Math.round(celsius * 9 / 5 + 32) + '\u00B0F';
+  return celsius.toFixed(1) + '\u00B0C';
+}
+function formatDist(km) {
+  if (km === undefined || km === null) return '';
+  if (isImperial()) return (km * 0.621371).toFixed(1) + ' mi';
+  return km.toFixed(1) + ' km';
+}
+function formatAlt(meters) {
+  if (meters === undefined || meters === null) return '';
+  if (isImperial()) return Math.round(meters * 3.28084) + ' ft';
+  return meters + ' m';
+}
+
 function getNodeName(nodeId) {
   if (!nodeId) return '?';
   var node = state.nodeCache[nodeId];
@@ -353,6 +381,46 @@ function getNodeName(nodeId) {
 function getNodeDistance(node) {
   if (!node.position || !node.position.lat || state.homeLat === null) return null;
   return calcDistance(state.homeLat, state.homeLon, node.position.lat, node.position.lon);
+}
+
+// --- EMOJI KEYBOARD ---
+var EMOJI_LIST = [
+  0x1F600, 0x1F602, 0x1F923, 0x2764, 0x1F525, 0x1F44D,
+  0x1F44E, 0x2705, 0x274C, 0x26A0, 0x2B50, 0x2728,
+  0x1F4AF, 0x1F389, 0x1F64F, 0x1F44B, 0x1F91D, 0x1F4AA,
+  0x1FAE0, 0x1F914, 0x1F308, 0x1F431, 0x1F436, 0x1F4E1,
+];
+
+function buildEmojiKeyboard() {
+  var html = '';
+  for (var e = 0; e < EMOJI_LIST.length; e++) {
+    var cp = EMOJI_LIST[e];
+    var hex = cp.toString(16).toUpperCase();
+    while (hex.length < 5) hex = '0' + hex;
+    html += '<button class="emoji-key" data-cp="' + String.fromCodePoint(cp) + '">' +
+      '<img src="/emoji/U' + hex + '.png" class="emoji-img" alt="">' +
+      '</button>';
+  }
+  emojiKeyboard.innerHTML = html;
+
+  var keys = emojiKeyboard.querySelectorAll('.emoji-key');
+  for (var k = 0; k < keys.length; k++) {
+    keys[k].addEventListener('click', function () {
+      var ch = this.getAttribute('data-cp');
+      insertAtCursor(inputField, ch);
+      emojiKeyboard.style.display = 'none';
+    });
+  }
+}
+
+function insertAtCursor(input, text) {
+  var start = input.selectionStart || 0;
+  var end = input.selectionEnd || 0;
+  var before = input.value.substring(0, start);
+  var after = input.value.substring(end);
+  input.value = before + text + after;
+  input.selectionStart = input.selectionEnd = start + text.length;
+  input.focus();
 }
 
 // --- OVERLAYS ---
@@ -588,7 +656,36 @@ function processMessages(data) {
   var added = ingestMessages(data);
   renderMessageList();
   if (statMsgs) statMsgs.textContent = state.messages.length + ' msgs';
+  flashNewMessages(added);
   return added;
+}
+
+function flashNewMessages(count) {
+  if (!count || count <= 0) return;
+  var allMsgs = messageList.querySelectorAll('.msg-item');
+  if (allMsgs.length === 0) return;
+  // Flash last N messages (capped at visible count)
+  var startIdx = Math.max(0, allMsgs.length - Math.min(count, allMsgs.length));
+  function flashOn() {
+    for (var i = startIdx; i < allMsgs.length; i++) {
+      if (allMsgs[i]) allMsgs[i].classList.add('flash-new');
+    }
+  }
+  function flashOff() {
+    for (var j = startIdx; j < allMsgs.length; j++) {
+      if (allMsgs[j]) allMsgs[j].classList.remove('flash-new');
+    }
+  }
+  flashOn();
+  setTimeout(function () {
+    flashOff();
+    setTimeout(function () {
+      flashOn();
+      setTimeout(function () {
+        flashOff();
+      }, 500);
+    }, 500);
+  }, 500);
 }
 
 function showMsgDetails(msg) {
@@ -713,24 +810,28 @@ function renderNodes(data) {
 
   for (var x = 0; x < filtered.length; x++) {
     var node = filtered[x];
-    var name = node.long_name || node.short_name || node.id || '?';
+    var displayName = node.long_name || node.short_name || node.id || '?';
     var ago = timeAgo(node.last_heard);
     var favCls = node.is_favorite ? ' fav' : '';
-    var roleTag = node.role ? ' [' + node.role + ']' : '';
 
     html += '<div class="node-row' + favCls + '" data-nodeid="' + escapeHtml(node.id) + '">';
-    html += '<span class="node-name">' + emojiToHtml(name) + roleTag + '</span>';
+    html += '<span class="node-name">' + emojiToHtml(displayName) + '</span>';
+    // Short name badge (only if different from display name)
+    if (node.short_name && node.long_name && node.short_name !== node.long_name) {
+      html += '<span class="name-badge">' + escapeHtml(node.short_name) + '</span>';
+    }
     html += '<span class="node-id">' + escapeHtml(node.id) + '</span>';
     html += '<span class="node-meta">' + ago + '</span>';
 
     // Tags row
     html += '<div class="node-tags">';
+    if (node.role) html += '<span class="node-tag">' + escapeHtml(node.role) + '</span>';
     if (node.telemetry) {
       var t = node.telemetry;
       if (t.battery !== undefined && t.battery !== null)
         html += '<span class="node-tag' + (t.battery < 10 ? ' warn' : '') + '">bat ' + t.battery + '%</span>';
       if (t.temp !== undefined && t.temp !== null)
-        html += '<span class="node-tag">' + t.temp.toFixed(1) + 'C</span>';
+        html += '<span class="node-tag">' + formatTemp(t.temp) + '</span>';
       if (t.voltage !== undefined && t.voltage !== null)
         html += '<span class="node-tag">' + t.voltage.toFixed(1) + 'V</span>';
     }
@@ -744,7 +845,7 @@ function renderNodes(data) {
       var dist = getNodeDistance(node);
       if (dist !== null) {
         var brng = bearing(state.homeLat, state.homeLon, node.position.lat, node.position.lon);
-        html += '<span class="node-tag">' + dist.toFixed(1) + 'km ' + brng + '</span>';
+        html += '<span class="node-tag">' + formatDist(dist) + ' ' + brng + '</span>';
       }
     }
     html += '</div></div>';
@@ -838,10 +939,10 @@ function showNodeDetails(node) {
     html += infoRow('lat', node.position.lat !== undefined ? node.position.lat.toFixed(6) : '--');
     html += infoRow('lon', node.position.lon !== undefined ? node.position.lon.toFixed(6) : '--');
     if (node.position.alt !== undefined && node.position.alt !== null)
-      html += infoRow('alt', node.position.alt + 'm');
+      html += infoRow('alt', formatAlt(node.position.alt));
     var dist = getNodeDistance(node);
     if (dist !== null) {
-      html += infoRow('dist', dist.toFixed(2) + ' km');
+      html += infoRow('dist', formatDist(dist));
       var brngVal = bearing(state.homeLat, state.homeLon, node.position.lat, node.position.lon);
       if (brngVal) html += infoRow('brng', brngVal);
     }
@@ -854,7 +955,7 @@ function showNodeDetails(node) {
     html += '<div class="info-grid">';
     if (t.battery !== undefined && t.battery !== null) html += infoRow('bat', t.battery + '%');
     if (t.voltage !== undefined && t.voltage !== null) html += infoRow('volt', t.voltage.toFixed(3) + 'V');
-    if (t.temp !== undefined && t.temp !== null) html += infoRow('temp', t.temp + 'C');
+    if (t.temp !== undefined && t.temp !== null) html += infoRow('temp', formatTemp(t.temp));
     if (t.humidity !== undefined && t.humidity !== null) html += infoRow('hum', t.humidity + '%');
     if (t.pressure !== undefined && t.pressure !== null) html += infoRow('pres', t.pressure + ' hPa');
     if (t.channel_util !== undefined && t.channel_util !== null)
@@ -1212,6 +1313,26 @@ function init() {
 
   // Settings
   saveSettingsBtn.addEventListener('click', saveSettings);
+
+  // Emoji keyboard toggle
+  buildEmojiKeyboard();
+  emojiBtn.addEventListener('click', function () {
+    if (emojiKeyboard.style.display === 'none') {
+      emojiKeyboard.style.display = '';
+    } else {
+      emojiKeyboard.style.display = 'none';
+    }
+  });
+
+  // Units toggle
+  unitsBtn.textContent = config.units;
+  unitsBtn.addEventListener('click', function () {
+    config.units = config.units === 'metric' ? 'imperial' : 'metric';
+    unitsBtn.textContent = config.units;
+    // Re-render everything that shows units
+    renderMessageList();
+    if (state.nodes.length > 0) renderNodes({ nodes: state.nodes, total: state.nodeTotal });
+  });
 
   document.getElementById('rebootBtn').addEventListener('click', function () {
     adminAction('reboot').then(function (r) {

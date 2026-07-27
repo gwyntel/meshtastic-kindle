@@ -520,3 +520,57 @@ html, body {
   vertical-align: -0.15em;
   image-rendering: pixelated;
 }
+
+/* --- EMOJI KEYBOARD --- */
+.emoji-keyboard {
+  display: flex; flex-direction: row; flex-wrap: wrap;
+  padding: 8px 0 4px 0;
+  border-top: 1px solid var(--c-soft2);
+  margin-top: 8px;
+}
+.emoji-key {
+  width: 40px; height: 40px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--c-soft2);
+  background: var(--c-bg);
+  cursor: pointer;
+  margin: 0 4px 4px 0;
+  padding: 2px;
+  -webkit-appearance: none; appearance: none;
+}
+.emoji-key:active {
+  background: var(--c-soft);
+  border-color: var(--c-border);
+}
+.emoji-key .emoji-img {
+  width: 24px; height: 24px;
+}
+
+/* --- NAME BADGE --- */
+.name-badge {
+  font-family: var(--ff-mono);
+  font-size: var(--fs-xs);
+  padding: 1px 6px;
+  background: var(--c-invert-bg);
+  color: var(--c-invert-fg);
+  font-weight: 700;
+}
+
+/* --- NEW MESSAGE FLASH (instant, no animation) --- */
+.msg-item.flash-new {
+  background: var(--c-invert-bg) !important;
+}
+.msg-item.flash-new .msg-meta,
+.msg-item.flash-new .msg-text {
+  color: var(--c-invert-fg);
+}
+.msg-item.flash-new .msg-meta .meta-tag {
+  border-color: var(--c-invert-fg);
+  color: var(--c-invert-fg);
+}
+.msg-item.flash-new .msg-meta .meta-name {
+  color: var(--c-invert-fg);
+}
+
+/* --- UNITS CHIP --- */
+#unitsBtn { text-transform: none; }
