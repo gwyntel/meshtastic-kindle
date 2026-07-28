@@ -829,15 +829,15 @@ function renderNodes(data) {
     var favCls = node.is_favorite ? ' fav' : '';
 
     html += '<div class="node-row' + favCls + '" data-nodeid="' + escapeHtml(node.id) + '">';
+    // Short name badge (only if different from display name) — emoji icon before name
+    if (node.short_name && node.long_name && node.short_name !== node.long_name) {
+      html += '<span class="name-badge">' + emojiToHtml(node.short_name) + '</span>';
+    }
     html += '<span class="node-name">' + emojiToHtml(displayName) + '</span>';
     // Favorite star badge
     if (node.is_favorite) {
       html += '<span class="name-badge" style="background:transparent;font-size:14px;">' +
         emojiImg(0x2B50) + '</span>';
-    }
-    // Short name badge (only if different from display name)
-    if (node.short_name && node.long_name && node.short_name !== node.long_name) {
-      html += '<span class="name-badge">' + escapeHtml(node.short_name) + '</span>';
     }
     html += '<span class="node-id">' + escapeHtml(node.id) + '</span>';
     html += '<span class="node-meta">' + ago + '</span>';

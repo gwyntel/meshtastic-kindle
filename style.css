@@ -189,7 +189,7 @@ html, body {
 
 /* --- MESSAGE ITEMS --- */
 .msg-item {
-  padding: 10px 14px;
+  padding: 14px 14px;
   border-bottom: 1px solid var(--c-soft2);
   cursor: pointer;
 }
@@ -419,7 +419,7 @@ html, body {
   font-family: var(--ff-body); font-size: var(--fs-md);
   padding: 9px 12px;
   border: 1px solid var(--c-border);
-  background: var(--c-bg); color: var(--c-fg);
+  background: var(--c-soft); color: var(--c-fg);
   min-height: var(--touch);
   -webkit-appearance: none; appearance: none;
 }
@@ -554,6 +554,11 @@ html, body {
   background: var(--c-invert-bg);
   color: var(--c-invert-fg);
   font-weight: 700;
+}
+
+/* Invert emoji images inside name badges so they're visible against dark background */
+.name-badge .emoji-img {
+  filter: invert(1);
 }
 
 /* --- NEW MESSAGE FLASH (instant, no animation) --- */
