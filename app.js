@@ -848,8 +848,12 @@ function renderNodes(data) {
     if (node.telemetry) {
       var t = node.telemetry;
       if (t.battery !== undefined && t.battery !== null) {
-        var batTag = 'bat ' + t.battery + '%';
-        if (t.battery >= 100) batTag += ' ' + emojiImg(0x1F50C);
+        var batTag;
+        if (t.battery >= 100) {
+          batTag = emojiImg(0x1F50C);
+        } else {
+          batTag = 'bat ' + t.battery + '%';
+        }
         html += '<span class="node-tag' + (t.battery < 10 ? ' warn' : '') + '">' + batTag + '</span>';
       }
       if (t.temp !== undefined && t.temp !== null)
