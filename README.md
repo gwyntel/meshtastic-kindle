@@ -1,3 +1,5 @@
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/gwyntel/meshtastic-kindle)
+
 # mesh-kindle
 
 A minimal Meshtastic client designed for Amazon Kindle e-ink browsers.
